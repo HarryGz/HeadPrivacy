@@ -71,6 +71,11 @@ final class AppController {
     private(set) var calibrationFlow: CalibrationFlowState?
     private(set) var calibrationStability = 0.0
     private(set) var calibrationError: String?
+    var canAcceptCalibration: Bool {
+        guard case .validating(let displayID) = calibrationFlow, displayID != nil,
+              let last = calibrationLastSample else { return false }
+        return timing.now() - last < .milliseconds(500)
+    }
     var calibrationHighlight: DisplayDescriptor? {
         switch calibrationFlow {
         case .sampling(let display, _, _): return display
@@ -254,6 +259,8 @@ final class AppController {
         if !motionRunning { motionRunning = true; motion.start() }
         motion.captureReference()
         calibrationFlow = .sampling(display: calibrationDisplays[0], index: 1, total: calibrationDisplays.count)
+        // Allow the initial authorization prompt time to resolve, but never wait forever.
+        scheduleStaleDeadline(from: timing.now(), awaitingFirstCalibrationSample: true)
     }
 
     func restartCalibration() {
@@ -282,6 +289,7 @@ final class AppController {
             abortCalibration("Motion samples stopped. Restart calibration when headphones are ready.")
             return
         }
+        guard canAcceptCalibration else { return }
         let resolved = displays.invalidCalibrationIDs(for: pendingCalibrations).union(pendingInvalidation)
         do { try calibrationStore.save(pendingCalibrations) }
         catch { calibrationError = "Could not save calibration: \(error)"; return }
@@ -465,7 +473,7 @@ final class AppController {
         let unsafe = stored.subtracting(persistable).union(invalid)
         // Guided calibration owns persistence until accepted. Invalidation and cancellation
         // must not replace the user's prior stored set with a partial or empty result.
-        if calibrationFlow != nil, calibrationFlow != .complete {
+        if calibrationActive {
             if changed || !unsafe.isEmpty {
                 pendingInvalidation.formUnion(stored.union(invalid))
                 calibrationRequired = true
@@ -567,18 +575,20 @@ final class AppController {
         if !userPaused { unavailable() }
     }
 
-    private func scheduleStaleDeadline(from timestamp: Duration) {
+    private func scheduleStaleDeadline(from timestamp: Duration, awaitingFirstCalibrationSample: Bool = false) {
         deadlineGeneration += 1
         let generation = deadlineGeneration
         staleTask?.cancel()
-        let deadline = timestamp + .milliseconds(500)
+        let deadline = timestamp + (awaitingFirstCalibrationSample ? .seconds(10) : .milliseconds(500))
         let timing = timing
         staleTask = Task { @MainActor [weak self] in
             do { try await timing.sleep(until: deadline) } catch { return }
             guard !Task.isCancelled, let self, self.deadlineGeneration == generation,
                   !self.terminated else { return }
             if self.calibrationActive {
-                self.abortCalibration("Motion samples stopped. Restart calibration when headphones are ready.")
+                self.abortCalibration(awaitingFirstCalibrationSample
+                    ? "No motion samples arrived. Check Motion access and your AirPods connection, then restart calibration."
+                    : "Motion samples stopped. Restart calibration when headphones are ready.")
                 return
             }
             guard !self.userPaused, !self.calibrationRequired else { return }

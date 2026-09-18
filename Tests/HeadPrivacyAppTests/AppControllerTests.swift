@@ -6,6 +6,88 @@ import HeadPrivacyMac
 
 @MainActor
 final class AppControllerTests: XCTestCase {
+    func testCancelledIntroDoesNotSuppressLaterTopologyInvalidation() async {
+        for policy in [FailurePolicy.usabilityFirst, .protectionFirst] {
+            let f = Fixture(policy: policy)
+            await f.controller.start()
+            let saved = f.calibrations.values
+            f.controller.beginCalibration()
+            f.controller.cancelCalibration()
+            XCTAssertEqual(f.calibrations.values, saved)
+            XCTAssertEqual(f.calibrations.saves, 0)
+            f.controller.resume()
+            await f.sample(0, at: .milliseconds(100))
+            await f.sample(0, at: .milliseconds(200))
+            XCTAssertEqual(f.controller.status, .viewing(displayName: "center"))
+            f.displays.change(to: Array(f.displays.displays.dropLast()))
+            await drain()
+            XCTAssertEqual(f.controller.status, .calibrationRequired)
+            XCTAssertEqual(f.controller.viewingState, .uncalibrated)
+            XCTAssertNil(f.controller.currentDisplayName)
+            XCTAssertEqual(f.overlays.last, policy == .protectionFirst ? ["left", "center"] : [])
+            XCTAssertTrue(f.calibrations.values.isEmpty)
+            XCTAssertEqual(f.calibrations.saves, 1)
+            XCTAssertEqual(f.displays.acknowledged, Set(["left", "center", "right"].map(DisplayID.init(rawValue:))))
+            await f.sample(0, at: .milliseconds(300))
+            XCTAssertEqual(f.controller.status, .calibrationRequired)
+            f.controller.shutdown()
+        }
+    }
+
+    func testSamplingWithoutFirstSampleTimesOutOnFirstRunAndRestart() async {
+        let f = Fixture()
+        f.calibrations.values = []
+        await f.controller.start()
+        f.controller.beginCalibration()
+        f.controller.startCalibrationSampling()
+        await f.event(.authorizationChanged(.notDetermined))
+        await f.advance(to: .seconds(5))
+        XCTAssertNotNil(f.controller.calibrationHighlight, "Allow time for the initial Motion prompt")
+        await f.advance(to: .seconds(10))
+        XCTAssertEqual(f.controller.calibrationFlow, .cancelled)
+        XCTAssertNotNil(f.controller.calibrationError)
+        XCTAssertNil(f.controller.calibrationHighlight)
+        XCTAssertEqual(f.calibrations.saves, 0)
+        f.controller.restartCalibration()
+        await f.event(.authorizationChanged(.authorized))
+        await f.advance(to: .seconds(20))
+        XCTAssertEqual(f.controller.calibrationFlow, .cancelled)
+        XCTAssertNotNil(f.controller.calibrationError)
+        XCTAssertEqual(f.motion.streamReads, 1)
+        XCTAssertEqual(f.motion.references, 2)
+        XCTAssertEqual(f.calibrations.saves, 0)
+        f.controller.shutdown()
+    }
+
+    func testCalibrationAcceptanceRequiresLiveClassifiedValidationObservation() async {
+        let f = Fixture()
+        await f.controller.start()
+        let saved = f.calibrations.values
+        f.controller.beginCalibration()
+        f.controller.startCalibrationSampling()
+        await f.capture(-60, starting: 100)
+        await f.capture(0, starting: 1200)
+        await f.capture(60, starting: 2300)
+        XCTAssertFalse(f.controller.canAcceptCalibration)
+        f.controller.acceptCalibration()
+        XCTAssertEqual(f.calibrations.saves, 0)
+        XCTAssertEqual(f.calibrations.values, saved)
+        XCTAssertEqual(f.controller.calibrationFlow, .validating(currentDisplay: nil))
+        XCTAssertTrue(f.controller.calibrationRequired)
+        await f.sample(0, at: .milliseconds(3400))
+        XCTAssertFalse(f.controller.canAcceptCalibration)
+        f.controller.acceptCalibration()
+        XCTAssertEqual(f.calibrations.saves, 0, "Wait for classifier dwell to produce a highlight")
+        await f.sample(0, at: .milliseconds(3500))
+        XCTAssertTrue(f.controller.canAcceptCalibration)
+        XCTAssertEqual(f.controller.calibrationHighlight?.name, "center")
+        f.controller.acceptCalibration()
+        XCTAssertEqual(f.calibrations.saves, 1)
+        XCTAssertEqual(f.controller.calibrationFlow, .complete)
+        XCTAssertFalse(f.controller.calibrationRequired)
+        f.controller.shutdown()
+    }
+
     func testCalibrationUsesLatestTopologyAtBeginAndAcknowledgesOnlyAfterSave() async {
         let f = Fixture()
         await f.controller.start()
@@ -21,6 +103,8 @@ final class AppControllerTests: XCTestCase {
         XCTAssertEqual(f.controller.calibrationFlow, .validating(currentDisplay: nil))
         XCTAssertEqual(f.calibrations.saves, 0)
         XCTAssertTrue(f.displays.acknowledged.isEmpty)
+        await f.sample(0, at: .milliseconds(2300))
+        await f.sample(0, at: .milliseconds(2400))
         f.controller.acceptCalibration()
         XCTAssertEqual(f.controller.calibrationFlow, .complete)
         XCTAssertEqual(f.calibrations.values.map(\.displayID.rawValue), ["left", "center"])
@@ -146,9 +230,11 @@ final class AppControllerTests: XCTestCase {
         for i in 3...11 { await f.sample(-60, at: .milliseconds(i * 100)) }
         await f.capture(0, starting: 1400)
         await f.capture(60, starting: 2500)
+        await f.sample(0, at: .milliseconds(3600))
+        await f.sample(0, at: .milliseconds(3700))
         f.calibrations.shouldFail = true
         f.controller.acceptCalibration()
-        XCTAssertEqual(f.controller.calibrationFlow, .validating(currentDisplay: nil))
+        XCTAssertEqual(f.controller.calibrationFlow, .validating(currentDisplay: .init(rawValue: "center")))
         XCTAssertTrue(f.controller.calibrationRequired)
         XCTAssertTrue(f.displays.acknowledged.isEmpty)
         XCTAssertEqual(f.overlays.last, [])
@@ -190,6 +276,8 @@ final class AppControllerTests: XCTestCase {
         await f.capture(0, starting: 1200)
         await f.capture(60, starting: 2300)
         f.calibrations.onSave = { f.displays.displays.removeLast() }
+        await f.sample(0, at: .milliseconds(3400))
+        await f.sample(0, at: .milliseconds(3500))
         f.controller.acceptCalibration()
         XCTAssertTrue(f.controller.calibrationRequired)
         XCTAssertEqual(f.controller.calibrationFlow, .cancelled)

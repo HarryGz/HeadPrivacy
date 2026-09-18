@@ -47,7 +47,9 @@ struct CalibrationView: View {
             case .validating:
                 Text("Look around to check that the highlight follows the display you face.")
                 Text(controller.calibrationHighlight?.name ?? "No display selected").font(.headline)
-                Button("Looks Correct", action: controller.acceptCalibration).buttonStyle(.borderedProminent)
+                Button("Looks Correct", action: controller.acceptCalibration)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!controller.canAcceptCalibration)
             case .complete:
                 Text("Calibration saved. Protection has resumed.")
             case .cancelled:
