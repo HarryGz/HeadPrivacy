@@ -12,7 +12,7 @@
 | CPU 架构 | arm64 |
 | AirPods 型号 / 固件 | NOT RECORDED |
 | 显示器型号 / 左右排列 | NOT RECORDED |
-| App commit / 版本 | `a463d2b` / `0.1.0` |
+| App commit / 版本 | `2dc4989` / `0.1.0` |
 | 执行人 | NOT RECORDED |
 
 状态只能填写：
