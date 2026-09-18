@@ -2,6 +2,24 @@ import XCTest
 @testable import HeadPrivacyCore
 
 final class CalibrationSessionTests: XCTestCase {
+    func testProgressRequiresBothTimeAndCountAndResetsAfterInstability() {
+        var session = CalibrationSession()
+        XCTAssertEqual(session.ingest(.init(yaw: .init(degrees: 0), timestamp: .zero)), .sampling)
+        XCTAssertEqual(session.ingest(.init(yaw: .init(degrees: 0), timestamp: .seconds(1))), .sampling)
+        XCTAssertEqual(session.stabilityProgress, 0.2, accuracy: 0.001)
+        XCTAssertEqual(session.ingest(.init(yaw: .init(degrees: 40), timestamp: .milliseconds(1100))), .sampling)
+        XCTAssertEqual(session.stabilityProgress, 0)
+        for i in 0..<10 {
+            XCTAssertEqual(session.ingest(.init(yaw: .init(degrees: 40), timestamp: .milliseconds(1200 + i * 100))), .sampling)
+        }
+        XCTAssertEqual(session.stabilityProgress, 0.9, accuracy: 0.001)
+        guard case .captured(let angle) = session.ingest(.init(yaw: .init(degrees: 40), timestamp: .milliseconds(2200))) else {
+            return XCTFail("Stable sampling must recover after reset")
+        }
+        XCTAssertEqual(angle.degrees, 40, accuracy: 0.001)
+        XCTAssertEqual(session.stabilityProgress, 1)
+    }
+
     func testStableOneSecondWindowCapturesItsCircularMean() {
         // Break caught: returning a capture before the window spans one second, or not capturing a stable window.
         var session = CalibrationSession()

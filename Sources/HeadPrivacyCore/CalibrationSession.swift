@@ -14,6 +14,14 @@ public struct CalibrationSession: Sendable {
 
     public init() {}
 
+    /// Progress is bounded by both elapsed stable time and the minimum sample count.
+    public var stabilityProgress: Double {
+        guard let first = samples.first, let last = samples.last else { return 0 }
+        let span = last.timestamp - first.timestamp
+        let seconds = Double(span.components.seconds) + Double(span.components.attoseconds) / 1e18
+        return min(1, max(0, seconds), Double(samples.count) / Double(Self.minimumSampleCount))
+    }
+
     public mutating func ingest(_ sample: MotionSample) -> CalibrationProgress {
         samples.append(sample)
 

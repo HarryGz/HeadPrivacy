@@ -13,6 +13,14 @@ enum AppStatus: Equatable {
     case viewing(displayName: String)
 }
 
+enum CalibrationFlowState: Equatable {
+    case intro
+    case sampling(display: DisplayDescriptor, index: Int, total: Int)
+    case validating(currentDisplay: DisplayID?)
+    case complete
+    case cancelled
+}
+
 @MainActor protocol DisplayRegistryProviding: AnyObject {
     var displays: [DisplayDescriptor] { get }
     var changes: AsyncStream<[DisplayDescriptor]> { get }
@@ -60,6 +68,16 @@ final class AppController {
     private(set) var serviceError: String?
     private(set) var settings: AppSettings
     private(set) var activeDisplays: [DisplayDescriptor] = []
+    private(set) var calibrationFlow: CalibrationFlowState?
+    private(set) var calibrationStability = 0.0
+    private(set) var calibrationError: String?
+    var calibrationHighlight: DisplayDescriptor? {
+        switch calibrationFlow {
+        case .sampling(let display, _, _): return display
+        case .validating(let id): return calibrationDisplays.first { $0.id == id }
+        default: return nil
+        }
+    }
     var onRecalibrationRequested: (@MainActor () -> Void)?
     var onSettingsRequested: (@MainActor () -> Void)?
     var onQuitRequested: (@MainActor () -> Void)?
@@ -98,6 +116,19 @@ final class AppController {
     private var latestSample: Duration?
     private var deadlineGeneration = 0
     private var lastApplication: (Set<DisplayID>, AppSettings)?
+    private var calibrationDisplays: [DisplayDescriptor] = []
+    private var calibrationSignature: DisplayTopologySignature?
+    private var pendingCalibrations: [DisplayCalibration] = []
+    private var calibrationSession = CalibrationSession()
+    private var calibrationLastSample: Duration?
+    private var calibrationChangedReference = false
+    private var calibrationWasRequired = true
+    private var calibrationActive: Bool {
+        switch calibrationFlow {
+        case .intro, .sampling, .validating: return true
+        default: return false
+        }
+    }
 
     init(motion: any MotionProviding, displays: any DisplayRegistryProviding,
          overlays: any OverlayCoordinating, preferences: any AppPreferencesProviding,
@@ -149,6 +180,7 @@ final class AppController {
 
     func resume() {
         guard started, !terminated, !sleeping else { return }
+        guard !calibrationActive else { return }
         userPaused = false
         refreshTopology()
         guard !calibrationRequired else { transition(.uncalibrated); return }
@@ -175,12 +207,167 @@ final class AppController {
         onRecalibrationRequested?()
     }
 
+    func beginCalibration() {
+        guard started, !terminated, !sleeping else { return }
+        let latest = DisplayTopology(displays: displays.displays)
+        calibrationWasRequired = calibrationRequired || referenceLost
+        pause()
+        calibrationFlow = .intro
+        calibrationError = nil
+        pendingCalibrations = []
+        calibrationChangedReference = false
+        calibrationSession = CalibrationSession()
+        calibrationStability = 0
+        calibrationLastSample = nil
+        calibrationDisplays = latest.displays
+        calibrationSignature = latest.signature
+        // Adopt the registry's current snapshot even if its stream notification is queued.
+        if topology?.signature != latest.signature {
+            pendingInvalidation.formUnion(calibrations.map(\.displayID))
+            calibrationWasRequired = true
+            calibrationRequired = true
+        }
+        pendingInvalidation.formUnion(displays.invalidCalibrationIDs(for: calibrations))
+        topology = latest
+        activeDisplays = latest.displays
+        overlays.reconcile(displays: activeDisplays)
+        lastApplication = nil
+        transition(.paused)
+        guard calibrationTopologyIsUsable(latest), !permissionDenied else {
+            abortCalibration("Calibration needs Motion access and a supported horizontal display arrangement with stable display identities.")
+            return
+        }
+    }
+
+    func startCalibrationSampling() {
+        guard calibrationFlow == .intro, checkCalibrationSession() else { return }
+        pendingCalibrations = []
+        calibrationError = nil
+        calibrationChangedReference = true
+        referenceLost = true
+        calibrationRequired = true
+        resetDetection()
+        calibrationSession = CalibrationSession()
+        calibrationStability = 0
+        calibrationLastSample = nil
+        sampleFloor = timing.now()
+        if !motionRunning { motionRunning = true; motion.start() }
+        motion.captureReference()
+        calibrationFlow = .sampling(display: calibrationDisplays[0], index: 1, total: calibrationDisplays.count)
+    }
+
+    func restartCalibration() {
+        guard started, !terminated, !sleeping else { return }
+        beginCalibration()
+        startCalibrationSampling()
+    }
+
+    func cancelCalibration() {
+        guard calibrationActive else { return }
+        let latest = DisplayTopology(displays: displays.displays)
+        let canRestore = !calibrationChangedReference && !calibrationWasRequired && !referenceLost
+            && latest.signature == calibrationSignature && validCalibration(for: latest)
+            && displays.invalidCalibrationIDs(for: calibrations).isEmpty
+        pendingCalibrations = []
+        calibrationFlow = .cancelled
+        calibrationStability = 0
+        calibrationRequired = !canRestore
+        pause()
+    }
+
+    func acceptCalibration() {
+        guard case .validating = calibrationFlow, checkCalibrationSession(),
+              pendingCalibrations.count == calibrationDisplays.count else { return }
+        guard let last = calibrationLastSample, timing.now() - last < .milliseconds(500) else {
+            abortCalibration("Motion samples stopped. Restart calibration when headphones are ready.")
+            return
+        }
+        let resolved = displays.invalidCalibrationIDs(for: pendingCalibrations).union(pendingInvalidation)
+        do { try calibrationStore.save(pendingCalibrations) }
+        catch { calibrationError = "Could not save calibration: \(error)"; return }
+        // Persistence can invoke external code; never acknowledge a newer topology.
+        guard checkCalibrationSession() else { return }
+        calibrations = pendingCalibrations
+        pendingCalibrations = []
+        displays.acknowledgeCalibrationResolution(for: resolved)
+        pendingInvalidation.subtract(resolved)
+        topology = DisplayTopology(displays: displays.displays)
+        activeDisplays = topology!.displays
+        overlays.reconcile(displays: activeDisplays)
+        referenceLost = false
+        calibrationRequired = false
+        calibrationError = nil
+        calibrationFlow = .complete
+        resume()
+    }
+
+    private func calibrationTopologyIsUsable(_ value: DisplayTopology) -> Bool {
+        value.support == .supported && !value.displays.isEmpty && value.displays.allSatisfy(\.isPersistable)
+            && Set(value.displays.map(\.id)).count == value.displays.count
+    }
+
+    private func checkCalibrationSession() -> Bool {
+        let latest = DisplayTopology(displays: displays.displays)
+        guard !terminated, !sleeping, !permissionDenied, calibrationTopologyIsUsable(latest),
+              latest.signature == calibrationSignature else {
+            abortCalibration("The calibration session changed. Restart calibration when displays and headphones are ready.")
+            return false
+        }
+        return true
+    }
+
+    private func abortCalibration(_ message: String) {
+        pendingCalibrations = []
+        calibrationFlow = .cancelled
+        calibrationError = message
+        calibrationStability = 0
+        calibrationRequired = true
+        userPaused = true
+        resetDetection()
+        transition(.paused)
+    }
+
+    private func ingestCalibration(_ sample: MotionSample) {
+        guard checkCalibrationSession(), sample.timestamp > sampleFloor,
+              calibrationLastSample.map({ sample.timestamp > $0 }) ?? true else { return }
+        if let last = calibrationLastSample, sample.timestamp - last >= .milliseconds(500) {
+            abortCalibration("Motion samples stopped. Restart calibration when headphones are ready.")
+            return
+        }
+        calibrationLastSample = sample.timestamp
+        switch calibrationFlow {
+        case .sampling(let display, let index, let total):
+            let progress = calibrationSession.ingest(sample)
+            calibrationStability = calibrationSession.stabilityProgress
+            if case .captured(let center) = progress {
+                pendingCalibrations.append(.init(displayID: display.id, displayName: display.name,
+                    centerYaw: center, halfWidth: settings.zoneHalfWidth))
+                calibrationSession = CalibrationSession()
+                calibrationStability = 0
+                if index < total {
+                    calibrationFlow = .sampling(display: calibrationDisplays[index], index: index + 1, total: total)
+                } else {
+                    configureDetection()
+                    calibrationFlow = .validating(currentDisplay: nil)
+                }
+            }
+        case .validating:
+            let filtered = MotionSample(yaw: filter.update(sample.yaw), timestamp: sample.timestamp)
+            let state = classifier.ingest(filtered, calibrations: pendingCalibrations)
+            if case .viewing(let id) = state { calibrationFlow = .validating(currentDisplay: id) }
+            else { calibrationFlow = .validating(currentDisplay: nil) }
+        default: break
+        }
+        scheduleStaleDeadline(from: sample.timestamp)
+    }
+
     func openSettings() { onSettingsRequested?() }
     func quit() { shutdown(); onQuitRequested?() }
 
     /// The application lifecycle adapter forwards NSWorkspace sleep/wake notifications.
     func prepareForSleep() {
         guard started, !terminated, !sleeping else { return }
+        if calibrationActive { abortCalibration("Sleep interrupted calibration. Restart after waking.") }
         sleeping = true
         restartMotionAfterSleep = motionRunning
         if motionRunning { motion.stop(); motionRunning = false }
@@ -227,6 +414,7 @@ final class AppController {
 
     func shutdown() {
         guard !terminated else { return }
+        if calibrationActive { abortCalibration("Calibration was cancelled when the app closed.") }
         terminated = true
         userPaused = true
         resetDetection()
@@ -275,6 +463,16 @@ final class AppController {
         let persistable = Set(latest.displays.filter(\.isPersistable).map(\.id))
         let stored = Set(calibrations.map(\.displayID))
         let unsafe = stored.subtracting(persistable).union(invalid)
+        // Guided calibration owns persistence until accepted. Invalidation and cancellation
+        // must not replace the user's prior stored set with a partial or empty result.
+        if calibrationFlow != nil, calibrationFlow != .complete {
+            if changed || !unsafe.isEmpty {
+                pendingInvalidation.formUnion(stored.union(invalid))
+                calibrationRequired = true
+                if changed, calibrationActive { abortCalibration("Displays changed. Restart calibration.") }
+            }
+            return
+        }
         if changed || !unsafe.isEmpty || !pendingInvalidation.isEmpty {
             resetDetection()
             calibrationRequired = true
@@ -315,6 +513,7 @@ final class AppController {
             let wasDenied = permissionDenied
             permissionDenied = authorization == .denied || authorization == .restricted
             if permissionDenied {
+                if calibrationActive { abortCalibration("Motion permission was lost. Restore access and restart calibration.") }
                 referenceLost = true
                 calibrationRequired = true
                 if !userPaused { unavailable(status: .permissionRequired) }
@@ -323,16 +522,18 @@ final class AppController {
                 if !userPaused { transition(.uncalibrated) }
             }
         case .connectionChanged(false):
+            if calibrationActive { abortCalibration("Headphones disconnected. Reconnect and restart calibration.") }
             referenceLost = true
             calibrationRequired = true
             if !userPaused { unavailable() }
         case .failed:
+            if calibrationActive { abortCalibration("Motion failed. Restart calibration when headphones are ready.") }
             referenceLost = true
             calibrationRequired = true
             motion.captureReference()
             if !userPaused { unavailable() }
         case .connectionChanged(true):
-            if referenceLost {
+            if referenceLost, !calibrationActive {
                 motion.captureReference()
                 if !userPaused { transition(.uncalibrated) }
             }
@@ -344,6 +545,7 @@ final class AppController {
                   sample.timestamp <= timing.now(), timing.now() - sample.timestamp < .milliseconds(500),
                   latestSample.map({ sample.timestamp >= $0 }) ?? true else { return }
             onMotionSample?(sample)
+            if calibrationActive { ingestCalibration(sample); return }
             if outageNotified {
                 invalidateQueuedNotification()
                 notifications.motionBecameAvailable()
@@ -361,6 +563,7 @@ final class AppController {
 
     private func motionStreamEnded() {
         motionRunning = false
+        if calibrationActive { abortCalibration("Motion stopped. Restart the app to calibrate.") }
         if !userPaused { unavailable() }
     }
 
@@ -373,7 +576,12 @@ final class AppController {
         staleTask = Task { @MainActor [weak self] in
             do { try await timing.sleep(until: deadline) } catch { return }
             guard !Task.isCancelled, let self, self.deadlineGeneration == generation,
-                  !self.userPaused, !self.calibrationRequired, !self.terminated else { return }
+                  !self.terminated else { return }
+            if self.calibrationActive {
+                self.abortCalibration("Motion samples stopped. Restart calibration when headphones are ready.")
+                return
+            }
+            guard !self.userPaused, !self.calibrationRequired else { return }
             // The core classifier uses a strict > threshold; enforce the app's 500 ms
             // boundary here as well, even when no subsequent motion callback arrives.
             let evaluated = self.classifier.evaluate(at: timing.now())

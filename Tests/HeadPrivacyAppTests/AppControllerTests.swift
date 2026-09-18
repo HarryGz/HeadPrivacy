@@ -6,6 +6,211 @@ import HeadPrivacyMac
 
 @MainActor
 final class AppControllerTests: XCTestCase {
+    func testCalibrationUsesLatestTopologyAtBeginAndAcknowledgesOnlyAfterSave() async {
+        let f = Fixture()
+        await f.controller.start()
+        f.displays.displays.removeLast()
+        f.displays.invalid = Set(["left", "center", "right", "unrelated"].map(DisplayID.init(rawValue:)))
+        f.controller.beginCalibration()
+        f.controller.startCalibrationSampling()
+        await f.event(.authorizationChanged(.authorized))
+        await f.event(.connectionChanged(true))
+        let references = f.motion.references
+        await f.capture(-60, starting: 100)
+        await f.capture(0, starting: 1200)
+        XCTAssertEqual(f.controller.calibrationFlow, .validating(currentDisplay: nil))
+        XCTAssertEqual(f.calibrations.saves, 0)
+        XCTAssertTrue(f.displays.acknowledged.isEmpty)
+        f.controller.acceptCalibration()
+        XCTAssertEqual(f.controller.calibrationFlow, .complete)
+        XCTAssertEqual(f.calibrations.values.map(\.displayID.rawValue), ["left", "center"])
+        XCTAssertEqual(f.displays.acknowledged, Set(["left", "center", "right"].map(DisplayID.init(rawValue:))))
+        XCTAssertEqual(f.displays.invalid, [.init(rawValue: "unrelated")])
+        XCTAssertEqual(f.motion.references, references)
+        f.controller.shutdown()
+    }
+
+    func testCalibrationHighlightsUseDisplayCoordinatesAndDisappearOutsideActiveSteps() {
+        let display = DisplayDescriptor(id: .init(rawValue: "external"), name: "External",
+            frame: CGRect(x: -1440, y: -80, width: 1440, height: 900), isBuiltIn: false, isPersistable: true)
+        let target = CalibrationHighlightPresentation(flow: .sampling(display: display, index: 2, total: 3),
+            displays: [display], stability: 0.6)
+        XCTAssertEqual(target?.frame, CGRect(x: -1440, y: -80, width: 1440, height: 900))
+        XCTAssertEqual(target?.displayName, "External")
+        XCTAssertEqual(target?.step, "Display 2 of 3")
+        XCTAssertEqual(target?.stability, 0.6)
+        XCTAssertNil(CalibrationHighlightPresentation(flow: .cancelled, displays: [display], stability: 1))
+        XCTAssertNil(CalibrationHighlightPresentation(flow: .validating(currentDisplay: nil), displays: [display], stability: 1))
+        XCTAssertEqual(CalibrationHighlightPresentation(flow: .validating(currentDisplay: display.id),
+            displays: [display], stability: 0)?.displayName, "External")
+    }
+
+    func testStaleCalibrationCannotBeAcceptedOrCountOldSamplesTowardStability() async {
+        let f = Fixture()
+        await f.controller.start()
+        f.controller.beginCalibration()
+        f.controller.startCalibrationSampling()
+        await f.capture(-60, starting: 100)
+        await f.capture(0, starting: 1200)
+        await f.capture(60, starting: 2300)
+        await f.advance(to: .milliseconds(3900))
+        f.controller.acceptCalibration()
+        XCTAssertEqual(f.calibrations.saves, 0)
+        XCTAssertEqual(f.controller.calibrationFlow, .cancelled)
+        f.controller.restartCalibration()
+        await f.sample(-60, at: .milliseconds(4000))
+        await f.advance(to: .milliseconds(4600))
+        XCTAssertEqual(f.controller.calibrationFlow, .cancelled)
+        XCTAssertEqual(f.controller.calibrationStability, 0)
+        f.controller.shutdown()
+    }
+
+    func testFirstRunCalibrationOrdersCapturesValidatesAndSavesOnce() async {
+        let f = Fixture(policy: .protectionFirst)
+        f.calibrations.values = []
+        f.displays.displays.reverse()
+        f.preferences.settings.zoneHalfWidth = .init(degrees: 32)
+        await f.controller.start()
+        XCTAssertEqual(f.motion.starts, 0)
+        f.controller.beginCalibration()
+        XCTAssertEqual(f.controller.calibrationFlow, .intro)
+        f.controller.startCalibrationSampling()
+        XCTAssertEqual(f.motion.starts, 1)
+        XCTAssertEqual(f.motion.references, 1)
+        XCTAssertEqual(f.controller.calibrationHighlight?.name, "left")
+        await f.sample(-60, at: .milliseconds(100))
+        await f.sample(-60, at: .milliseconds(500))
+        XCTAssertEqual(f.controller.calibrationStability, 0.2, accuracy: 0.001)
+        XCTAssertEqual(f.controller.calibrationHighlight?.name, "left")
+        // Time alone cannot replace the minimum sample count.
+        for i in 7...14 { await f.sample(-60, at: .milliseconds(i * 100)) }
+        XCTAssertEqual(f.controller.calibrationHighlight?.name, "center")
+        XCTAssertEqual(f.controller.calibrationStability, 0)
+        await f.capture(0, starting: 1700)
+        XCTAssertEqual(f.controller.calibrationHighlight?.name, "right")
+        await f.capture(60, starting: 2800)
+        XCTAssertEqual(f.controller.calibrationFlow, .validating(currentDisplay: nil))
+        XCTAssertEqual(f.calibrations.saves, 0)
+        XCTAssertEqual(f.overlays.last, [])
+        f.controller.resume()
+        XCTAssertEqual(f.overlays.last, [])
+        await f.sample(0, at: .milliseconds(4000))
+        await f.sample(0, at: .milliseconds(4100))
+        XCTAssertEqual(f.controller.calibrationHighlight?.name, "center")
+        f.controller.acceptCalibration()
+        XCTAssertEqual(f.calibrations.saves, 1)
+        XCTAssertEqual(f.calibrations.values.map(\.displayID.rawValue), ["left", "center", "right"])
+        XCTAssertEqual(f.calibrations.values.map(\.halfWidth.degrees), [32, 32, 32])
+        XCTAssertEqual(f.controller.calibrationFlow, .complete)
+        XCTAssertFalse(f.controller.calibrationRequired)
+        await f.sample(0, at: .milliseconds(4200))
+        await f.sample(0, at: .milliseconds(4300))
+        XCTAssertEqual(f.overlays.last, ["left", "right"])
+        XCTAssertEqual(f.motion.streamReads, 1)
+        XCTAssertEqual(f.motion.references, 1)
+        f.controller.shutdown()
+    }
+
+    func testCalibrationCancelAndRestartNeverPersistPendingCenters() async {
+        let f = Fixture()
+        await f.controller.start()
+        let saved = f.calibrations.values
+        f.controller.beginCalibration()
+        f.controller.cancelCalibration()
+        XCTAssertFalse(f.controller.calibrationRequired)
+        f.controller.beginCalibration()
+        f.controller.startCalibrationSampling()
+        await f.capture(-40, starting: 100)
+        f.controller.restartCalibration()
+        XCTAssertEqual(f.controller.calibrationHighlight?.name, "left")
+        XCTAssertEqual(f.controller.calibrationStability, 0)
+        XCTAssertEqual(f.motion.references, 3)
+        f.controller.cancelCalibration()
+        XCTAssertEqual(f.controller.calibrationFlow, .cancelled)
+        XCTAssertEqual(f.calibrations.values, saved)
+        XCTAssertEqual(f.calibrations.saves, 0)
+        XCTAssertTrue(f.controller.calibrationRequired)
+        f.controller.shutdown()
+    }
+
+    func testCalibrationRejectsInvalidSamplesAndSaveFailureStaysInValidation() async {
+        let f = Fixture(policy: .protectionFirst)
+        await f.controller.start()
+        f.controller.beginCalibration()
+        f.controller.startCalibrationSampling()
+        await f.sample(-60, at: .milliseconds(100))
+        await f.sample(-60, at: .milliseconds(200))
+        await f.event(.sample(.init(yaw: .init(degrees: 90), timestamp: .milliseconds(150))))
+        await f.event(.sample(.init(yaw: .init(radians: .nan), timestamp: .milliseconds(200))))
+        XCTAssertEqual(f.controller.calibrationStability, 0.1, accuracy: 0.001)
+        for i in 3...11 { await f.sample(-60, at: .milliseconds(i * 100)) }
+        await f.capture(0, starting: 1400)
+        await f.capture(60, starting: 2500)
+        f.calibrations.shouldFail = true
+        f.controller.acceptCalibration()
+        XCTAssertEqual(f.controller.calibrationFlow, .validating(currentDisplay: nil))
+        XCTAssertTrue(f.controller.calibrationRequired)
+        XCTAssertTrue(f.displays.acknowledged.isEmpty)
+        XCTAssertEqual(f.overlays.last, [])
+        XCTAssertNotNil(f.controller.calibrationError)
+        f.calibrations.shouldFail = false
+        f.controller.acceptCalibration()
+        XCTAssertEqual(f.controller.calibrationFlow, .complete)
+        f.controller.shutdown()
+    }
+
+    func testCalibrationInvalidationAndInterveningTopologyCannotEnableOrSavePartialSet() async {
+        for cause in 0...4 {
+            let f = Fixture(policy: .protectionFirst)
+            await f.controller.start()
+            let saved = f.calibrations.values
+            f.controller.beginCalibration()
+            f.controller.startCalibrationSampling()
+            await f.capture(-60, starting: 100)
+            switch cause {
+            case 0: f.displays.change(to: Array(f.displays.displays.dropLast())); await drain()
+            case 1: await f.event(.authorizationChanged(.denied))
+            case 2: await f.event(.connectionChanged(false))
+            case 3: f.controller.prepareForSleep()
+            default: f.controller.shutdown()
+            }
+            f.controller.acceptCalibration()
+            XCTAssertEqual(f.controller.calibrationFlow, .cancelled)
+            XCTAssertEqual(f.calibrations.values, saved)
+            XCTAssertEqual(f.calibrations.saves, 0)
+            XCTAssertEqual(f.overlays.last, [])
+            XCTAssertTrue(f.controller.calibrationRequired)
+            f.controller.shutdown()
+        }
+        let f = Fixture()
+        await f.controller.start()
+        f.controller.beginCalibration()
+        f.controller.startCalibrationSampling()
+        await f.capture(-60, starting: 100)
+        await f.capture(0, starting: 1200)
+        await f.capture(60, starting: 2300)
+        f.calibrations.onSave = { f.displays.displays.removeLast() }
+        f.controller.acceptCalibration()
+        XCTAssertTrue(f.controller.calibrationRequired)
+        XCTAssertEqual(f.controller.calibrationFlow, .cancelled)
+        XCTAssertTrue(f.displays.acknowledged.isEmpty)
+        f.controller.shutdown()
+    }
+
+    func testUnsupportedCalibrationDoesNotStartMotion() async {
+        let f = Fixture()
+        f.calibrations.values = []
+        f.displays.displays = [DisplayDescriptor(id: .init(rawValue: "temporary"), name: "Temporary",
+            frame: CGRect(x: -1000, y: 0, width: 1000, height: 800), isBuiltIn: true, isPersistable: false)]
+        await f.controller.start()
+        f.controller.beginCalibration()
+        f.controller.startCalibrationSampling()
+        XCTAssertEqual(f.motion.starts, 0)
+        XCTAssertNotNil(f.controller.calibrationError)
+        XCTAssertNil(f.controller.calibrationHighlight)
+        f.controller.shutdown()
+    }
+
     func testDetectionChangeDuringStaleOutagePreservesFailureAndNotifiesOnce() async {
         let f = Fixture(policy: .protectionFirst)
         await f.controller.start()
@@ -434,6 +639,9 @@ private final class Fixture {
         await event(.sample(.init(yaw: .init(degrees: yaw), timestamp: time)))
     }
     func advance(to time: Duration) async { timing.advance(to: time); await drain() }
+    func capture(_ yaw: Double, starting milliseconds: Int64) async {
+        for i in 0...10 { await sample(yaw, at: .milliseconds(milliseconds + Int64(i) * 100)) }
+    }
 }
 
 private final class MotionFake: MotionProviding {
