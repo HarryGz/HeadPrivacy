@@ -38,6 +38,7 @@ struct CalibrationView: View {
             case .intro:
                 Text("Wear your AirPods and allow Motion access. Look at the center of the leftmost display, then choose Begin. Keep your head steady for about one second on each highlighted display.")
                 Text("Protection is paused while you calibrate.").foregroundStyle(.secondary)
+                Text("All display centers are revalidated. Calibration is needed after each launch because the head reference cannot be restored.").font(.callout)
                 Button("Begin", action: controller.startCalibrationSampling)
             case .sampling(let display, let index, let total):
                 Text("Display \(index) of \(total): \(display.name)").font(.headline)
@@ -83,6 +84,10 @@ final class CalibrationWindowController: NSWindowController, NSWindowDelegate {
 
     init(controller: AppController) {
         self.controller = controller
+        super.init(window: nil)
+    }
+
+    private func createWindow() {
         let panel = NSPanel(contentRect: CGRect(x: 0, y: 0, width: 438, height: 300),
             styleMask: [.titled, .closable, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.title = "Calibrate Displays"
@@ -90,7 +95,7 @@ final class CalibrationWindowController: NSWindowController, NSWindowDelegate {
         panel.hidesOnDeactivate = false
         panel.level = .floating
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        super.init(window: panel)
+        window = panel
         panel.delegate = self
         panel.contentView = NSHostingView(rootView: CalibrationView(controller: controller))
         panel.center()
@@ -99,6 +104,8 @@ final class CalibrationWindowController: NSWindowController, NSWindowDelegate {
     required init?(coder: NSCoder) { nil }
 
     func present() {
+        if window == nil { createWindow() }
+        if controller.isCalibrationActive { window?.orderFrontRegardless(); return }
         controller.beginCalibration()
         window?.orderFrontRegardless()
     }

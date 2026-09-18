@@ -21,6 +21,13 @@ enum CalibrationFlowState: Equatable {
     case cancelled
 }
 
+struct DisplayCalibrationSummary: Identifiable {
+    let display: DisplayDescriptor
+    let halfWidthDegrees: Double?
+    let isCalibrated: Bool
+    var id: DisplayID { display.id }
+}
+
 @MainActor protocol DisplayRegistryProviding: AnyObject {
     var displays: [DisplayDescriptor] { get }
     var changes: AsyncStream<[DisplayDescriptor]> { get }
@@ -65,12 +72,34 @@ final class AppController {
     private(set) var viewingState: ViewingState = .paused
     private(set) var currentDisplayName: String?
     private(set) var calibrationRequired = true
-    private(set) var serviceError: String?
+    private var operationError: String?
+    private(set) var hotkeyError: String?
+    private(set) var loginItemError: String?
+    private(set) var registeredHotkey: HotkeyDescriptor?
+    private(set) var serviceError: String? {
+        get {
+            let errors = [operationError, hotkeyError, loginItemError].compactMap { $0 }
+            return errors.isEmpty ? nil : errors.joined(separator: "\n")
+        }
+        set { operationError = newValue }
+    }
     private(set) var settings: AppSettings
     private(set) var activeDisplays: [DisplayDescriptor] = []
     private(set) var calibrationFlow: CalibrationFlowState?
     private(set) var calibrationStability = 0.0
     private(set) var calibrationError: String?
+    private(set) var notificationAuthorizationMessage: String?
+    var isCalibrationActive: Bool { calibrationActive }
+    var isPaused: Bool { userPaused }
+    var needsMotionPermission: Bool { permissionDenied }
+    var canControlProtection: Bool { !calibrationActive && !calibrationRequired && !permissionDenied }
+    var displayCalibrationSummaries: [DisplayCalibrationSummary] {
+        activeDisplays.map { display in
+            let calibration = calibrations.first { $0.displayID == display.id }
+            return .init(display: display, halfWidthDegrees: calibration?.halfWidth.degrees,
+                isCalibrated: calibration != nil && !calibrationRequired)
+        }
+    }
     var canAcceptCalibration: Bool {
         guard case .validating(let displayID) = calibrationFlow, displayID != nil,
               let last = calibrationLastSample else { return false }
@@ -146,12 +175,14 @@ final class AppController {
         self.timing = timing; settings = preferences.settings.validated()
     }
 
-    func start() async {
+    func start(requireCalibration: Bool = false) async {
         guard !started, !terminated else { return }
         started = true
         configureDetection()
         do { calibrations = try calibrationStore.load() }
         catch { serviceError = "Could not load calibration: \(error)" }
+        // A saved relative angle does not preserve Core Motion's physical reference.
+        if requireCalibration { referenceLost = true }
         refreshTopology()
         let events = motion.events
         motionTask = Task { @MainActor [weak self] in
@@ -175,7 +206,7 @@ final class AppController {
     }
 
     func pause() {
-        guard started, !terminated else { return }
+        guard started, !terminated, !calibrationActive else { return }
         userPaused = true
         invalidateQueuedNotification()
         resetDetection()
@@ -348,8 +379,9 @@ final class AppController {
             let progress = calibrationSession.ingest(sample)
             calibrationStability = calibrationSession.stabilityProgress
             if case .captured(let center) = progress {
+                let width = calibrations.first { $0.displayID == display.id }?.halfWidth ?? settings.zoneHalfWidth
                 pendingCalibrations.append(.init(displayID: display.id, displayName: display.name,
-                    centerYaw: center, halfWidth: settings.zoneHalfWidth))
+                    centerYaw: center, halfWidth: width))
                 calibrationSession = CalibrationSession()
                 calibrationStability = 0
                 if index < total {
@@ -420,6 +452,38 @@ final class AppController {
         await configureServices()
     }
 
+    /// Explicit per-display edits persist one complete set and retain the shared centers.
+    @discardableResult
+    func updateDisplayWidth(_ id: DisplayID, degrees: Double) -> Bool {
+        guard started, !terminated, !calibrationActive, !calibrationRequired, degrees.isFinite,
+              DisplayTopology(displays: displays.displays).signature == topology?.signature,
+              let index = calibrations.firstIndex(where: { $0.displayID == id }) else {
+            serviceError = "Calibrate the current display arrangement before editing its viewing zones."
+            return false
+        }
+        var updated = calibrations
+        updated[index].halfWidth = .init(degrees: min(90, max(5, degrees)))
+        do { try calibrationStore.save(updated) }
+        catch { serviceError = "Could not save viewing zone: \(error)"; return false }
+        guard DisplayTopology(displays: displays.displays).signature == topology?.signature else {
+            refreshTopology()
+            serviceError = "Displays changed. Recalibrate before editing viewing zones."
+            return false
+        }
+        calibrations = updated
+        configureDetection()
+        return true
+    }
+
+    /// Only the explicit Settings button calls this; enabling the preference never prompts.
+    func requestNotificationAuthorization() async {
+        do {
+            let granted = try await notifications.requestAuthorizationFromSettings()
+            notificationAuthorizationMessage = granted ? "Notifications allowed."
+                : "Enable notifications in System Settings → Notifications → HeadPrivacy."
+        } catch { serviceError = "Could not request notifications: \(error)" }
+    }
+
     func shutdown() {
         guard !terminated else { return }
         if calibrationActive { abortCalibration("Calibration was cancelled when the app closed.") }
@@ -432,15 +496,32 @@ final class AppController {
         displayTask?.cancel(); displayTask = nil
         invalidateQueuedNotification()
         hotkey.unregister()
+        registeredHotkey = nil
         overlays.reconcile(displays: [])
     }
 
     private func configureServices() async {
         notifications.isEnabled = settings.notificationsEnabled
-        do { try hotkey.register(settings.hotkeyDescriptor) { [weak self] in self?.togglePause() } }
-        catch { serviceError = "Could not register shortcut: \(error)" }
-        do { try await loginItem.setEnabled(settings.launchAtLogin) }
-        catch { serviceError = "Could not update login item: \(error)" }
+        do {
+            try hotkey.register(settings.hotkeyDescriptor) { [weak self] in self?.togglePause() }
+            registeredHotkey = settings.hotkeyDescriptor
+            hotkeyError = nil
+        } catch {
+            // Invalid descriptors preserve the registrar's old shortcut; OS failures do not.
+            if let failure = error as? HotKeyRegistrationError {
+                if case .system = failure { registeredHotkey = nil }
+            } else { registeredHotkey = nil }
+            hotkeyError = "Could not register shortcut: \(error)"
+        }
+        do {
+            try await loginItem.setEnabled(settings.launchAtLogin)
+            loginItemError = nil
+            if settings.launchAtLogin, loginItem.status == .requiresApproval {
+                loginItemError = "Approve HeadPrivacy in System Settings → General → Login Items."
+            } else if settings.launchAtLogin, loginItem.status == .unavailable {
+                loginItemError = "Launch at login is unavailable. Use the installed HeadPrivacy app bundle."
+            }
+        } catch { loginItemError = "Could not update login item: \(error)" }
     }
 
     private func configureDetection() {

@@ -1,11 +1,160 @@
 import XCTest
 import CoreMotion
+import AppKit
 import HeadPrivacyCore
 import HeadPrivacyMac
 @testable import HeadPrivacyApp
 
 @MainActor
 final class AppControllerTests: XCTestCase {
+    func testGuidedRevalidationPreservesSavedWidthsForExistingDisplayIdentities() async {
+        let f = Fixture()
+        f.calibrations.values[1].halfWidth = .init(degrees: 40)
+        await f.controller.start(requireCalibration: true)
+        var settings = f.controller.settings
+        settings.zoneHalfWidth = .init(degrees: 15)
+        await f.controller.updateSettings(settings)
+        f.controller.beginCalibration()
+        f.controller.startCalibrationSampling()
+        await f.capture(-60, starting: 100)
+        await f.capture(0, starting: 1200)
+        await f.capture(60, starting: 2300)
+        await f.sample(0, at: .milliseconds(3400))
+        await f.sample(0, at: .milliseconds(3500))
+        f.controller.acceptCalibration()
+        XCTAssertEqual(f.controller.calibrationFlow, .complete)
+        XCTAssertEqual(f.calibrations.values.map { $0.halfWidth.degrees }, [25, 40, 25])
+        f.controller.shutdown()
+    }
+
+    func testServiceFailuresRemainVisibleTogetherAndShortcutLabelTracksRegistration() async {
+        let f = Fixture()
+        f.hotkey.shouldFail = true
+        f.login.shouldFail = true
+        await f.controller.start()
+        XCTAssertNotNil(f.controller.hotkeyError)
+        XCTAssertNotNil(f.controller.loginItemError)
+        XCTAssertNil(f.controller.registeredHotkey)
+        XCTAssertTrue(f.controller.serviceError?.contains("shortcut") == true)
+        XCTAssertTrue(f.controller.serviceError?.contains("login") == true)
+        f.hotkey.shouldFail = false
+        f.login.shouldFail = false
+        await f.controller.updateSettings(f.controller.settings)
+        XCTAssertNil(f.controller.hotkeyError)
+        XCTAssertNil(f.controller.loginItemError)
+        XCTAssertNil(f.controller.serviceError)
+        XCTAssertEqual(f.controller.registeredHotkey, .default)
+        f.controller.shutdown()
+    }
+
+    func testProductionLaunchRequiresFreshReferenceCalibrationDespiteSavedCenters() async {
+        let f = Fixture()
+        await f.controller.start(requireCalibration: true)
+        XCTAssertTrue(f.controller.calibrationRequired)
+        XCTAssertEqual(f.motion.starts, 0)
+        XCTAssertEqual(f.calibrations.saves, 0)
+        f.controller.resume()
+        XCTAssertEqual(f.motion.starts, 0)
+        f.controller.shutdown()
+    }
+
+    func testLifecycleStartsOnceForwardsSleepWakeAndRemovesObserversOnShutdown() async {
+        let f = Fixture()
+        let center = NotificationCenter()
+        let lifecycle = AppLifecycle(controller: f.controller, workspaceNotifications: center)
+        await lifecycle.start()
+        await lifecycle.start()
+        XCTAssertEqual(f.motion.streamReads, 1)
+        XCTAssertEqual(f.displays.streamReads, 1)
+        XCTAssertTrue(f.controller.calibrationRequired)
+        f.controller.beginCalibration()
+        f.controller.startCalibrationSampling()
+        center.post(name: NSWorkspace.willSleepNotification, object: nil)
+        await drain()
+        XCTAssertEqual(f.motion.stops, 1)
+        XCTAssertEqual(f.controller.calibrationFlow, .cancelled)
+        center.post(name: NSWorkspace.didWakeNotification, object: nil)
+        await drain()
+        XCTAssertEqual(f.motion.starts, 2)
+        lifecycle.shutdown()
+        lifecycle.shutdown()
+        center.post(name: NSWorkspace.didWakeNotification, object: nil)
+        center.post(name: NSWorkspace.willSleepNotification, object: nil)
+        await drain()
+        XCTAssertEqual(f.motion.stops, 2)
+        XCTAssertEqual(f.motion.starts, 2)
+        XCTAssertEqual(f.overlays.reconciled.last, [])
+    }
+
+    func testLaunchModeRecognizesOnlyDocumentedDiagnosticFlag() {
+        XCTAssertEqual(AppLaunchMode(arguments: ["HeadPrivacyApp"]), .application)
+        XCTAssertEqual(AppLaunchMode(arguments: ["HeadPrivacyApp", "--overlay-preview"]), .overlayPreview)
+        XCTAssertEqual(AppLaunchMode(arguments: ["HeadPrivacyApp", "--preview"]), .application)
+    }
+
+    func testProtectionCommandsCannotCancelActiveCalibrationDeadline() async {
+        let f = Fixture()
+        await f.controller.start()
+        f.controller.beginCalibration()
+        f.controller.startCalibrationSampling()
+        XCTAssertFalse(f.controller.canControlProtection)
+        f.controller.pause()
+        f.controller.togglePause()
+        f.controller.temporarilyRevealAll()
+        f.hotkey.handler?()
+        await f.advance(to: .seconds(10))
+        XCTAssertEqual(f.controller.calibrationFlow, .cancelled)
+        XCTAssertNotNil(f.controller.calibrationError)
+        f.controller.shutdown()
+    }
+
+    func testDisplayWidthOverrideSavesWholeSetWithoutChangingCentersAndRejectsFailedSave() async {
+        let f = Fixture()
+        await f.controller.start()
+        let original = f.calibrations.values
+        XCTAssertEqual(f.controller.displayCalibrationSummaries.count, 3)
+        XCTAssertTrue(f.controller.updateDisplayWidth(.init(rawValue: "center"), degrees: 40))
+        XCTAssertEqual(f.calibrations.values.map(\.centerYaw), original.map(\.centerYaw))
+        XCTAssertEqual(f.calibrations.values.map { $0.halfWidth.degrees }, [25, 40, 25])
+        XCTAssertEqual(f.controller.settings.zoneHalfWidth.degrees, 25)
+        f.calibrations.shouldFail = true
+        XCTAssertFalse(f.controller.updateDisplayWidth(.init(rawValue: "center"), degrees: 10))
+        XCTAssertEqual(f.controller.displayCalibrationSummaries[1].halfWidthDegrees, 40)
+        XCTAssertNotNil(f.controller.serviceError)
+        f.calibrations.shouldFail = false
+        XCTAssertTrue(f.controller.updateDisplayWidth(.init(rawValue: "center"), degrees: 100))
+        XCTAssertEqual(f.calibrations.values[1].halfWidth.degrees, 90)
+        XCTAssertFalse(f.controller.updateDisplayWidth(.init(rawValue: "center"), degrees: .nan))
+        f.controller.beginCalibration()
+        XCTAssertFalse(f.controller.updateDisplayWidth(.init(rawValue: "center"), degrees: 30))
+        f.controller.shutdown()
+    }
+
+    func testDisplayWidthRejectsLatestTopologyAndDoesNotWrite() async {
+        let f = Fixture()
+        await f.controller.start()
+        f.displays.displays.removeLast()
+        XCTAssertFalse(f.controller.updateDisplayWidth(.init(rawValue: "center"), degrees: 40))
+        XCTAssertEqual(f.calibrations.saves, 0)
+        XCTAssertNotNil(f.controller.serviceError)
+        f.controller.shutdown()
+    }
+
+    func testNotificationsRequestOnlyFromExplicitActionAndSurfaceDenialAndErrors() async {
+        let f = Fixture()
+        await f.controller.start()
+        await f.controller.updateSettings(f.controller.settings)
+        XCTAssertEqual(f.notifications.authorizationRequests, 0)
+        f.notifications.authorizationGranted = false
+        await f.controller.requestNotificationAuthorization()
+        XCTAssertEqual(f.notifications.authorizationRequests, 1)
+        XCTAssertNotNil(f.controller.notificationAuthorizationMessage)
+        f.notifications.shouldFail = true
+        await f.controller.requestNotificationAuthorization()
+        XCTAssertNotNil(f.controller.serviceError)
+        f.controller.shutdown()
+    }
+
     func testCancelledIntroDoesNotSuppressLaterTopologyInvalidation() async {
         for policy in [FailurePolicy.usabilityFirst, .protectionFirst] {
             let f = Fixture(policy: policy)
@@ -793,13 +942,53 @@ private final class MotionFake: MotionProviding {
     var shouldFail = false
     var suspendDelivery = false
     var delivery: CheckedContinuation<Void, Never>?
-    func requestAuthorizationFromSettings() async throws -> Bool { true }
+    var authorizationRequests = 0
+    var authorizationGranted = true
+    func requestAuthorizationFromSettings() async throws -> Bool {
+        authorizationRequests += 1
+        if shouldFail { throw TestError.unavailable }
+        return authorizationGranted
+    }
     func motionBecameUnavailable(failurePolicy: FailurePolicy) async throws {
         outages += 1
         if shouldFail { throw TestError.unavailable }
         if suspendDelivery { await withCheckedContinuation { delivery = $0 } }
     }
     func motionBecameAvailable() {}
+}
+
+@MainActor
+final class AppDependencyFactoryTests: XCTestCase {
+    func testProductionGraphSharesDependenciesWithoutStartingServicesOrWritingPreferences() throws {
+        let suite = "HeadPrivacy.factory-tests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let graph = AppDependencyFactory.make(defaults: defaults, calibrationURL: url,
+            displayProvider: { [] })
+        let dependencies = Dictionary(uniqueKeysWithValues: Mirror(reflecting: graph.controller).children.compactMap {
+            child -> (String, Any)? in child.label.map { ($0, child.value) }
+        })
+        XCTAssertTrue((dependencies["preferences"] as? PreferencesStore) === graph.preferences)
+        XCTAssertTrue((dependencies["displays"] as? DisplayRegistry) === graph.displays)
+        XCTAssertTrue((dependencies["overlays"] as? OverlayCoordinator) === graph.overlays)
+        XCTAssertTrue((dependencies["motion"] as? CoreMotionProvider) === graph.motion)
+        XCTAssertTrue((dependencies["notifications"] as? NotificationController) === graph.notifications)
+        XCTAssertTrue((dependencies["hotkey"] as? GlobalHotKeyRegistrar) === graph.hotkey)
+        XCTAssertTrue((dependencies["loginItem"] as? LoginItemController) === graph.loginItem)
+        XCTAssertEqual(Mirror(reflecting: graph.motion).children.first { $0.label == "active" }?.value as? Bool, false)
+        XCTAssertEqual(Mirror(reflecting: graph.hotkey).children.first { $0.label == "installedHandler" }?.value as? Bool, false)
+        let motionClock = try XCTUnwrap(Mirror(reflecting: graph.motion).children.first { $0.label == "clock" }?.value as? ContinuousClockAdapter)
+        let controllerClock = try XCTUnwrap((dependencies["timing"] as? ContinuousAppControllerTiming)?.clock as? ContinuousClockAdapter)
+        let origin = try XCTUnwrap(Mirror(reflecting: graph.clock).children.first { $0.label == "origin" }?.value as? ContinuousClock.Instant)
+        XCTAssertEqual(Mirror(reflecting: motionClock).children.first { $0.label == "origin" }?.value as? ContinuousClock.Instant, origin)
+        XCTAssertEqual(Mirror(reflecting: controllerClock).children.first { $0.label == "origin" }?.value as? ContinuousClock.Instant, origin)
+        XCTAssertEqual(graph.controller.status, .paused)
+        XCTAssertTrue(graph.controller.activeDisplays.isEmpty)
+        XCTAssertNil(graph.calibrationPresenter.window)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+        XCTAssertNil(defaults.persistentDomain(forName: suite)?["appSettings.v1"])
+    }
 }
 @MainActor private final class HotkeyFake: GlobalHotKeyRegistering {
     var handler: (@MainActor () -> Void)?
