@@ -7,6 +7,256 @@ import HeadPrivacyMac
 
 @MainActor
 final class AppControllerTests: XCTestCase {
+    func testNextDisplayWaitsForExplicitReadyAndFreshStableWindow() async {
+        // Break caught: the previous display's steady samples silently calibrate the next display.
+        let f = Fixture()
+        await f.controller.start()
+        f.controller.beginCalibration()
+        f.controller.startCalibrationSampling()
+
+        for i in 1...11 { await f.sample(-60, at: .milliseconds(Int64(i) * 100)) }
+        XCTAssertEqual(f.controller.calibrationFlow,
+            .ready(display: f.displays.displays[1], index: 2, total: 3))
+        XCTAssertEqual(f.controller.calibrationStability, 0)
+
+        for i in 12...24 { await f.sample(-60, at: .milliseconds(Int64(i) * 100)) }
+        XCTAssertEqual(f.controller.calibrationFlow,
+            .ready(display: f.displays.displays[1], index: 2, total: 3))
+
+        f.controller.startCalibrationSampling()
+        XCTAssertEqual(f.controller.calibrationFlow,
+            .sampling(display: f.displays.displays[1], index: 2, total: 3))
+        for i in 25...35 { await f.sample(0, at: .milliseconds(Int64(i) * 100)) }
+        XCTAssertEqual(f.controller.calibrationFlow,
+            .ready(display: f.displays.displays[2], index: 3, total: 3))
+        f.controller.shutdown()
+    }
+
+    func testSamplingConfirmationOutsideAReadyCalibrationDoesNothing() async {
+        // Break caught: a stale UI action aborts an otherwise idle controller.
+        let f = Fixture()
+        await f.controller.start()
+        f.controller.startCalibrationSampling()
+        XCTAssertNil(f.controller.calibrationFlow)
+        XCTAssertNil(f.controller.calibrationError)
+        f.controller.shutdown()
+    }
+
+    func testRuntimeTopologyInvalidationRequestsOneDeferredRecalibrationPrompt() async {
+        // Break caught: an unsafe hot-plug leaves the menu status changed but never opens recovery UI.
+        let f = Fixture()
+        var requests = 0
+        f.controller.onRecalibrationRequested = { requests += 1 }
+        await f.controller.start()
+        f.displays.change(to: Array(f.displays.displays.dropLast()))
+        XCTAssertEqual(requests, 0, "Topology reconciliation must not synchronously reenter presentation")
+        await drain()
+        XCTAssertEqual(requests, 1)
+        f.displays.change(to: [f.displays.displays[0]])
+        await drain()
+        XCTAssertEqual(requests, 1, "One unsafe requirement produces one recovery panel")
+        f.controller.shutdown()
+    }
+
+    func testReferenceLossCoalescesPromptAndShutdownCancelsQueuedPresentation() async {
+        // Break caught: repeated Core Motion failures stack calibration panels or present after shutdown.
+        let f = Fixture()
+        var requests = 0
+        f.controller.onRecalibrationRequested = { requests += 1 }
+        await f.controller.start()
+        f.controller.receive(.failed(.motionFailed("lost")))
+        f.controller.receive(.connectionChanged(false))
+        await drain()
+        XCTAssertEqual(requests, 1)
+        f.controller.shutdown()
+        f.controller.receive(.failed(.motionFailed("late")))
+        await drain()
+        XCTAssertEqual(requests, 1)
+
+        let g = Fixture()
+        var lateRequests = 0
+        g.controller.onRecalibrationRequested = { lateRequests += 1 }
+        await g.controller.start()
+        g.controller.receive(.failed(.motionFailed("lost")))
+        g.controller.shutdown()
+        await drain()
+        XCTAssertEqual(lateRequests, 0)
+    }
+
+    func testWakeRequestsRecoveryButInitialRequiredCalibrationDoesNotDoublePresent() async {
+        // Break caught: launch opens two panels, or wake requires calibration without surfacing it.
+        let launch = Fixture()
+        var launchRequests = 0
+        launch.controller.onRecalibrationRequested = { launchRequests += 1 }
+        await launch.controller.start(requireCalibration: true)
+        await drain()
+        XCTAssertEqual(launchRequests, 0)
+        launch.controller.shutdown()
+
+        let wake = Fixture()
+        var wakeRequests = 0
+        wake.controller.onRecalibrationRequested = { wakeRequests += 1 }
+        await wake.controller.start()
+        wake.controller.prepareForSleep()
+        wake.controller.resumeAfterWake()
+        wake.controller.resumeAfterWake()
+        await drain()
+        XCTAssertEqual(wakeRequests, 1)
+        wake.controller.shutdown()
+    }
+
+    func testSuppressedDeferredPromptCleansUpSoLaterReferenceLossCanPrompt() async {
+        // Break caught: a deferred prompt whose guard loses a race remains retained and
+        // permanently prevents future runtime recovery prompts after calibration succeeds.
+        let f = Fixture()
+        var requests = 0
+        f.controller.onRecalibrationRequested = { requests += 1 }
+        await f.controller.start()
+
+        f.controller.receive(.failed(.motionFailed("first loss")))
+        f.controller.beginCalibration()
+        await drain()
+        XCTAssertEqual(requests, 0, "The already-visible manual flow suppresses the deferred prompt")
+
+        f.controller.startCalibrationSampling()
+        await f.capture(-60, starting: 100)
+        await f.capture(0, starting: 1200)
+        await f.capture(60, starting: 2300)
+        await f.sample(0, at: .milliseconds(3400))
+        await f.sample(0, at: .milliseconds(3500))
+        f.controller.acceptCalibration()
+        XCTAssertFalse(f.controller.calibrationRequired)
+
+        f.controller.receive(.failed(.motionFailed("second loss")))
+        await drain()
+        XCTAssertEqual(requests, 1)
+        f.controller.shutdown()
+    }
+
+    func testIndividualRecalibrationKeepsReferenceAndPersistsOneChangedCenterInFullSet() async {
+        // Break caught: a per-row action secretly restarts full calibration or drops peer widths/centers.
+        let f = Fixture()
+        f.calibrations.values[0].halfWidth = .init(degrees: 20)
+        f.calibrations.values[1].halfWidth = .init(degrees: 35)
+        f.calibrations.values[2].halfWidth = .init(degrees: 40)
+        await f.controller.start()
+        let original = f.calibrations.values
+        let references = f.motion.references
+        let centerID = DisplayID(rawValue: "center")
+        XCTAssertTrue(f.controller.canRecalibrateDisplay(centerID))
+
+        f.controller.requestDisplayRecalibration(centerID)
+        XCTAssertEqual(f.controller.calibrationFlow,
+            .ready(display: f.displays.displays[1], index: 1, total: 1))
+        XCTAssertEqual(f.motion.references, references)
+        f.controller.startCalibrationSampling()
+        for i in 1...11 { await f.sample(12, at: .milliseconds(Int64(i) * 100)) }
+        XCTAssertEqual(f.controller.calibrationFlow, .validating(currentDisplay: nil))
+        await f.sample(12, at: .milliseconds(1200))
+        await f.sample(12, at: .milliseconds(1300))
+        f.controller.acceptCalibration()
+
+        XCTAssertEqual(f.motion.references, references)
+        XCTAssertEqual(f.calibrations.saves, 1)
+        XCTAssertEqual(f.calibrations.values.count, 3)
+        XCTAssertEqual(f.calibrations.values.map(\.halfWidth), original.map(\.halfWidth))
+        XCTAssertEqual(f.calibrations.values[0].centerYaw, original[0].centerYaw)
+        XCTAssertEqual(f.calibrations.values[1].centerYaw.degrees, 12, accuracy: 0.001)
+        XCTAssertEqual(f.calibrations.values[2].centerYaw, original[2].centerYaw)
+        f.controller.shutdown()
+    }
+
+    func testCancellingIndividualRecalibrationRestoresEligibilityAndSavedSet() async {
+        // Break caught: cancelling a safe single-display edit destroys the valid calibration set.
+        let f = Fixture()
+        await f.controller.start()
+        let original = f.calibrations.values
+        let references = f.motion.references
+        let centerID = DisplayID(rawValue: "center")
+        f.controller.requestDisplayRecalibration(centerID)
+        f.controller.startCalibrationSampling()
+        for i in 1...4 { await f.sample(15, at: .milliseconds(Int64(i) * 100)) }
+        f.controller.cancelCalibration()
+        XCTAssertFalse(f.controller.calibrationRequired)
+        XCTAssertTrue(f.controller.canRecalibrateDisplay(centerID))
+        XCTAssertEqual(f.motion.references, references)
+        XCTAssertEqual(f.calibrations.values, original)
+        XCTAssertEqual(f.calibrations.saves, 0)
+        f.controller.shutdown()
+
+        let unsafe = Fixture()
+        await unsafe.controller.start(requireCalibration: true)
+        XCTAssertFalse(unsafe.controller.canRecalibrateDisplay(centerID))
+        unsafe.controller.requestDisplayRecalibration(centerID)
+        XCTAssertNil(unsafe.controller.calibrationFlow)
+        unsafe.controller.shutdown()
+    }
+
+    func testProtectionFirstFailureExplainsCoverageAndKeepsRevealEscapeEnabled() async {
+        // Break caught: a fail-closed overlay hides content without an explanation or visible escape.
+        let f = Fixture(policy: .protectionFirst)
+        await f.controller.start()
+        f.controller.receive(.failed(.motionFailed("lost")))
+        XCTAssertEqual(f.overlays.last, ["left", "center", "right"])
+        XCTAssertTrue(f.overlays.lastMessage?.contains("shortcut") == true)
+        XCTAssertTrue(f.controller.canPauseProtection)
+        XCTAssertTrue(f.controller.canTemporarilyRevealAll)
+        XCTAssertFalse(f.controller.canResumeProtection)
+
+        f.hotkey.handler?()
+        XCTAssertEqual(f.overlays.last, [])
+        XCTAssertNil(f.overlays.lastMessage)
+        XCTAssertTrue(f.controller.isPaused)
+        XCTAssertFalse(f.controller.canResumeProtection,
+            "A lost reference must be recalibrated before protection resumes")
+        f.controller.shutdown()
+    }
+
+    func testProtectionStatusMessageIsAbsentForNormalProtectionPauseAndPermissionDenial() async {
+        // Break caught: the recovery explanation appears during normal viewing or unsafe permission UI.
+        let f = Fixture(policy: .protectionFirst)
+        await f.controller.start()
+        await f.sample(0, at: .zero)
+        await f.sample(0, at: .milliseconds(100))
+        XCTAssertEqual(f.overlays.last, ["left", "right"])
+        XCTAssertNil(f.overlays.lastMessage)
+        f.controller.pause()
+        XCTAssertNil(f.overlays.lastMessage)
+        f.controller.receive(.authorizationChanged(.denied))
+        XCTAssertFalse(f.controller.canPauseProtection)
+        XCTAssertFalse(f.controller.canTemporarilyRevealAll)
+        XCTAssertFalse(f.controller.canResumeProtection)
+        XCTAssertNil(f.overlays.lastMessage)
+        f.controller.shutdown()
+    }
+
+    func testExternalOnlyRuntimeTopologyInvalidatesClassificationAndRequestsRecovery() async {
+        // Break caught: a MacBook with its built-in screen disabled continues using stale centers.
+        let f = Fixture(policy: .protectionFirst)
+        var requests = 0
+        f.controller.onRecalibrationRequested = { requests += 1 }
+        await f.controller.start()
+        await f.sample(0, at: .zero)
+        await f.sample(0, at: .milliseconds(100))
+        XCTAssertEqual(f.controller.status, .viewing(displayName: "center"))
+
+        let externalOnly = f.displays.displays.map {
+            DisplayDescriptor(id: $0.id, name: $0.name, frame: $0.frame,
+                              isBuiltIn: false, isPersistable: true)
+        }
+        f.displays.change(to: externalOnly)
+        await drain()
+        XCTAssertTrue(f.controller.calibrationRequired)
+        XCTAssertEqual(f.controller.viewingState, .uncalibrated)
+        XCTAssertNil(f.controller.currentDisplayName)
+        XCTAssertEqual(f.overlays.last, ["left", "center", "right"])
+        XCTAssertTrue(f.controller.serviceError?.contains("built-in") == true)
+        XCTAssertEqual(requests, 1)
+        await f.sample(0, at: .milliseconds(200))
+        XCTAssertEqual(f.controller.viewingState, .uncalibrated)
+        f.controller.shutdown()
+    }
+
     func testUnrelatedSettingsPreserveHotkeyRegistrationAndQueuedActiveEvent() async {
         let f = Fixture()
         await f.controller.start()
@@ -1023,6 +1273,7 @@ private final class Fixture {
     }
     func advance(to time: Duration) async { timing.advance(to: time); await drain() }
     func capture(_ yaw: Double, starting milliseconds: Int64) async {
+        if case .ready = controller.calibrationFlow { controller.startCalibrationSampling() }
         for i in 0...10 { await sample(yaw, at: .milliseconds(milliseconds + Int64(i) * 100)) }
     }
 }
@@ -1068,12 +1319,14 @@ private final class MotionFake: MotionProviding {
 }
 
 @MainActor private final class OverlaySpy: OverlayCoordinating {
-    var applications: [(Set<DisplayID>, AppSettings)] = []
+    var applications: [(Set<DisplayID>, AppSettings, String?)] = []
     var reconciled: [[DisplayDescriptor]] = []
     var last: Set<String> { Set(applications.last?.0.map(\.rawValue) ?? []) }
+    var lastMessage: String? { applications.last?.2 }
     func reconcile(displays: [DisplayDescriptor]) { reconciled.append(displays) }
-    func apply(protectedDisplayIDs: Set<DisplayID>, settings: AppSettings, animated: Bool) {
-        applications.append((protectedDisplayIDs, settings))
+    func apply(protectedDisplayIDs: Set<DisplayID>, settings: AppSettings, animated: Bool,
+               statusMessage: String?) {
+        applications.append((protectedDisplayIDs, settings, statusMessage))
     }
 }
 @MainActor private final class PreferencesFake: AppPreferencesProviding { var settings = AppSettings.defaults }

@@ -129,6 +129,38 @@ final class OverlayLayoutTests: XCTestCase {
     }
 
     @MainActor
+    func testProtectedOverlayInstallsNoninteractiveStatusWithoutChangingWindowFocusBehavior() throws {
+        // Break caught: fail-closed coverage has no recovery explanation or makes the overlay interactive.
+        _ = NSApplication.shared
+        let coordinator = OverlayCoordinator()
+        let target = display("built-in", x: 0)
+        coordinator.reconcile(displays: [target])
+        coordinator.apply(protectedDisplayIDs: [target.id], settings: .defaults, animated: false,
+                          statusMessage: "Tracking unavailable. Pause or reveal with the shortcut/menu.")
+        let window = try XCTUnwrap(coordinator.windows[target.id])
+        let view = try XCTUnwrap(window.contentView as? OverlayView)
+        XCTAssertEqual(view.statusMessage,
+            "Tracking unavailable. Pause or reveal with the shortcut/menu.")
+        XCTAssertNotNil(view.statusPanel)
+        XCTAssertNil(view.hitTest(.zero))
+        XCTAssertTrue(window.ignoresMouseEvents)
+        XCTAssertFalse(window.canBecomeKey)
+        XCTAssertFalse(window.canBecomeMain)
+        XCTAssertTrue(window.styleMask.contains(.nonactivatingPanel))
+
+        coordinator.apply(protectedDisplayIDs: [target.id],
+                          settings: AppSettings(protectionMode: .fullScreen), animated: false,
+                          statusMessage: "Tracking unavailable. Pause or reveal with the shortcut/menu.")
+        XCTAssertTrue(view.subviews.last === view.statusPanel,
+            "Appearance changes must keep the recovery panel above protection material")
+
+        coordinator.apply(protectedDisplayIDs: [], settings: .defaults, animated: false,
+                          statusMessage: nil)
+        XCTAssertNil(view.statusMessage)
+        XCTAssertNil(view.statusPanel)
+    }
+
+    @MainActor
     private func display(_ id: String, x: CGFloat) -> DisplayDescriptor {
         DisplayDescriptor(id: .init(rawValue: id), name: id,
             frame: CGRect(x: x, y: 0, width: 1440, height: 900), isBuiltIn: false, isPersistable: true)

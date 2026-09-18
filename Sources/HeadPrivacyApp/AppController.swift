@@ -15,6 +15,7 @@ enum AppStatus: Equatable {
 
 enum CalibrationFlowState: Equatable {
     case intro
+    case ready(display: DisplayDescriptor, index: Int, total: Int)
     case sampling(display: DisplayDescriptor, index: Int, total: Int)
     case validating(currentDisplay: DisplayID?)
     case complete
@@ -38,7 +39,8 @@ extension DisplayRegistry: DisplayRegistryProviding {}
 
 @MainActor protocol OverlayCoordinating: AnyObject {
     func reconcile(displays: [DisplayDescriptor])
-    func apply(protectedDisplayIDs: Set<DisplayID>, settings: AppSettings, animated: Bool)
+    func apply(protectedDisplayIDs: Set<DisplayID>, settings: AppSettings, animated: Bool,
+               statusMessage: String?)
 }
 extension OverlayCoordinator: OverlayCoordinating {}
 
@@ -74,13 +76,14 @@ final class AppController {
     private(set) var calibrationRequired = true
     private var operationError: String?
     private var displayWidthError: String?
+    private var topologyError: String?
     private var notificationAuthorizationError: String?
     private(set) var hotkeyError: String?
     private(set) var loginItemError: String?
     private(set) var registeredHotkey: HotkeyDescriptor?
     private(set) var serviceError: String? {
         get {
-            let errors = [operationError, displayWidthError, notificationAuthorizationError,
+            let errors = [operationError, displayWidthError, topologyError, notificationAuthorizationError,
                           hotkeyError, loginItemError].compactMap { $0 }
             return errors.isEmpty ? nil : errors.joined(separator: "\n")
         }
@@ -95,7 +98,10 @@ final class AppController {
     var isCalibrationActive: Bool { calibrationActive }
     var isPaused: Bool { userPaused }
     var needsMotionPermission: Bool { permissionDenied }
-    var canControlProtection: Bool { !calibrationActive && !calibrationRequired && !permissionDenied }
+    var canPauseProtection: Bool { started && !terminated && !userPaused && !calibrationActive && !permissionDenied }
+    var canResumeProtection: Bool { started && !terminated && userPaused && !calibrationActive && !calibrationRequired && !permissionDenied }
+    var canTemporarilyRevealAll: Bool { canPauseProtection }
+    var canControlProtection: Bool { canPauseProtection || canResumeProtection }
     var displayCalibrationSummaries: [DisplayCalibrationSummary] {
         activeDisplays.map { display in
             let calibration = calibrations.first { $0.displayID == display.id }
@@ -110,6 +116,7 @@ final class AppController {
     }
     var calibrationHighlight: DisplayDescriptor? {
         switch calibrationFlow {
+        case .ready(let display, _, _): return display
         case .sampling(let display, _, _): return display
         case .validating(let id): return calibrationDisplays.first { $0.id == id }
         default: return nil
@@ -138,6 +145,8 @@ final class AppController {
     private var displayTask: Task<Void, Never>?
     private var staleTask: Task<Void, Never>?
     private var notificationTask: Task<Void, Never>?
+    private var recalibrationPromptTask: Task<Void, Never>?
+    private var recalibrationPromptIssued = false
     private var loginReconciliationTask: Task<Void, Never>?
     private var loginRevision = 0
     private var started = false
@@ -155,7 +164,7 @@ final class AppController {
     private var sampleFloor: Duration = .zero
     private var latestSample: Duration?
     private var deadlineGeneration = 0
-    private var lastApplication: (Set<DisplayID>, AppSettings)?
+    private var lastApplication: (Set<DisplayID>, AppSettings, String?)?
     private var calibrationDisplays: [DisplayDescriptor] = []
     private var calibrationSignature: DisplayTopologySignature?
     private var pendingCalibrations: [DisplayCalibration] = []
@@ -163,9 +172,10 @@ final class AppController {
     private var calibrationLastSample: Duration?
     private var calibrationChangedReference = false
     private var calibrationWasRequired = true
+    private var individualCalibrationID: DisplayID?
     private var calibrationActive: Bool {
         switch calibrationFlow {
-        case .intro, .sampling, .validating: return true
+        case .intro, .ready, .sampling, .validating: return true
         default: return false
         }
     }
@@ -240,7 +250,15 @@ final class AppController {
         scheduleStaleDeadline(from: timing.now())
     }
 
-    func togglePause() { if userPaused { resume() } else { pause() } }
+    func togglePause() {
+        if userPaused {
+            guard canResumeProtection else { return }
+            resume()
+        } else {
+            guard canPauseProtection else { return }
+            pause()
+        }
+    }
 
     /// Reveals until the user explicitly resumes; no hidden timer can re-cover a display.
     func temporarilyRevealAll() { pause() }
@@ -259,6 +277,7 @@ final class AppController {
         calibrationFlow = .intro
         calibrationError = nil
         pendingCalibrations = []
+        individualCalibrationID = nil
         calibrationChangedReference = false
         calibrationSession = CalibrationSession()
         calibrationStability = 0
@@ -284,20 +303,39 @@ final class AppController {
     }
 
     func startCalibrationSampling() {
-        guard calibrationFlow == .intro, checkCalibrationSession() else { return }
-        pendingCalibrations = []
-        calibrationError = nil
-        calibrationChangedReference = true
-        referenceLost = true
-        calibrationRequired = true
-        resetDetection()
+        let readyTarget: (DisplayDescriptor, Int, Int)?
+        let isIntro: Bool
+        switch calibrationFlow {
+        case .intro:
+            readyTarget = nil
+            isIntro = true
+        case .ready(let display, let index, let total):
+            readyTarget = (display, index, total)
+            isIntro = false
+        default:
+            return
+        }
+        guard checkCalibrationSession() else { return }
+        let target: (DisplayDescriptor, Int, Int)
+        if isIntro {
+            pendingCalibrations = []
+            calibrationError = nil
+            calibrationChangedReference = true
+            referenceLost = true
+            calibrationRequired = true
+            resetDetection()
+            if !motionRunning { motionRunning = true; motion.start() }
+            motion.captureReference()
+            target = (calibrationDisplays[0], 1, calibrationDisplays.count)
+        } else {
+            guard let readyTarget else { return }
+            target = readyTarget
+        }
         calibrationSession = CalibrationSession()
         calibrationStability = 0
         calibrationLastSample = nil
         sampleFloor = timing.now()
-        if !motionRunning { motionRunning = true; motion.start() }
-        motion.captureReference()
-        calibrationFlow = .sampling(display: calibrationDisplays[0], index: 1, total: calibrationDisplays.count)
+        calibrationFlow = .sampling(display: target.0, index: target.1, total: target.2)
         // Allow the initial authorization prompt time to resolve, but never wait forever.
         scheduleStaleDeadline(from: timing.now(), awaitingFirstCalibrationSample: true)
     }
@@ -308,6 +346,36 @@ final class AppController {
         startCalibrationSampling()
     }
 
+    func canRecalibrateDisplay(_ id: DisplayID) -> Bool {
+        let latest = DisplayTopology(displays: displays.displays)
+        return started && !terminated && !sleeping && !permissionDenied && !calibrationActive
+            && !calibrationRequired && !referenceLost && latest.signature == topology?.signature
+            && validCalibration(for: latest) && displays.invalidCalibrationIDs(for: calibrations).isEmpty
+            && calibrations.contains(where: { $0.displayID == id })
+    }
+
+    /// Starts a one-display edit against the current live reference. The explicit ready
+    /// step prevents motion generated while turning toward the target from being sampled.
+    func requestDisplayRecalibration(_ id: DisplayID) {
+        guard canRecalibrateDisplay(id),
+              let display = activeDisplays.first(where: { $0.id == id }) else { return }
+        let latest = DisplayTopology(displays: displays.displays)
+        pause()
+        calibrationDisplays = latest.displays
+        calibrationSignature = latest.signature
+        pendingCalibrations = calibrations
+        individualCalibrationID = id
+        calibrationWasRequired = false
+        calibrationChangedReference = false
+        calibrationError = nil
+        calibrationSession = CalibrationSession()
+        calibrationStability = 0
+        calibrationLastSample = nil
+        resetDetection()
+        calibrationFlow = .ready(display: display, index: 1, total: 1)
+        onRecalibrationRequested?()
+    }
+
     func cancelCalibration() {
         guard calibrationActive else { return }
         let latest = DisplayTopology(displays: displays.displays)
@@ -315,9 +383,11 @@ final class AppController {
             && latest.signature == calibrationSignature && validCalibration(for: latest)
             && displays.invalidCalibrationIDs(for: calibrations).isEmpty
         pendingCalibrations = []
+        individualCalibrationID = nil
         calibrationFlow = .cancelled
         calibrationStability = 0
         calibrationRequired = !canRestore
+        if canRestore { recalibrationPromptIssued = false }
         pause()
     }
 
@@ -336,6 +406,7 @@ final class AppController {
         guard checkCalibrationSession() else { return }
         calibrations = pendingCalibrations
         pendingCalibrations = []
+        individualCalibrationID = nil
         displays.acknowledgeCalibrationResolution(for: resolved)
         pendingInvalidation.subtract(resolved)
         topology = DisplayTopology(displays: displays.displays)
@@ -343,6 +414,7 @@ final class AppController {
         overlays.reconcile(displays: activeDisplays)
         referenceLost = false
         calibrationRequired = false
+        recalibrationPromptIssued = false
         calibrationError = nil
         calibrationFlow = .complete
         resume()
@@ -365,6 +437,7 @@ final class AppController {
 
     private func abortCalibration(_ message: String) {
         pendingCalibrations = []
+        individualCalibrationID = nil
         calibrationFlow = .cancelled
         calibrationError = message
         calibrationStability = 0
@@ -375,6 +448,13 @@ final class AppController {
     }
 
     private func ingestCalibration(_ sample: MotionSample) {
+        // Motion while the user is turning toward the newly highlighted display must
+        // never become part of that display's stable sampling window.
+        if case .ready = calibrationFlow { return }
+        ingestActiveCalibration(sample)
+    }
+
+    private func ingestActiveCalibration(_ sample: MotionSample) {
         guard checkCalibrationSession(), sample.timestamp > sampleFloor,
               calibrationLastSample.map({ sample.timestamp > $0 }) ?? true else { return }
         if let last = calibrationLastSample, sample.timestamp - last >= .milliseconds(500) {
@@ -388,12 +468,24 @@ final class AppController {
             calibrationStability = calibrationSession.stabilityProgress
             if case .captured(let center) = progress {
                 let width = calibrations.first { $0.displayID == display.id }?.halfWidth ?? settings.zoneHalfWidth
-                pendingCalibrations.append(.init(displayID: display.id, displayName: display.name,
-                    centerYaw: center, halfWidth: width))
+                let captured = DisplayCalibration(displayID: display.id, displayName: display.name,
+                    centerYaw: center, halfWidth: width)
+                if individualCalibrationID == display.id,
+                   let position = pendingCalibrations.firstIndex(where: { $0.displayID == display.id }) {
+                    pendingCalibrations[position] = captured
+                } else {
+                    pendingCalibrations.append(captured)
+                }
                 calibrationSession = CalibrationSession()
                 calibrationStability = 0
-                if index < total {
-                    calibrationFlow = .sampling(display: calibrationDisplays[index], index: index + 1, total: total)
+                if individualCalibrationID != nil {
+                    configureDetection()
+                    calibrationFlow = .validating(currentDisplay: nil)
+                } else if index < total {
+                    calibrationLastSample = nil
+                    deadlineGeneration += 1
+                    staleTask?.cancel(); staleTask = nil
+                    calibrationFlow = .ready(display: calibrationDisplays[index], index: index + 1, total: total)
                 } else {
                     configureDetection()
                     calibrationFlow = .validating(currentDisplay: nil)
@@ -453,6 +545,7 @@ final class AppController {
         }
         restartMotionAfterSleep = false
         transition(userPaused ? .paused : .uncalibrated)
+        scheduleRecalibrationPrompt()
     }
 
     func updateSettings(_ value: AppSettings) async {
@@ -530,6 +623,8 @@ final class AppController {
         invalidateQueuedNotification()
         loginReconciliationTask?.cancel()
         loginReconciliationTask = nil
+        recalibrationPromptTask?.cancel()
+        recalibrationPromptTask = nil
         motionPermissionRetryPending = false
         hotkey.unregister()
         registeredHotkey = nil
@@ -606,6 +701,7 @@ final class AppController {
 
     private func refreshTopology() {
         let latest = DisplayTopology(displays: displays.displays)
+        topologyError = topologySupportMessage(for: latest)
         let initial = topology == nil
         let changed = topology.map { $0.signature != latest.signature } ?? false
         if topology?.signature != latest.signature {
@@ -630,7 +726,9 @@ final class AppController {
         }
         if changed || !unsafe.isEmpty || !pendingInvalidation.isEmpty {
             resetDetection()
+            let shouldPrompt = !initial && !calibrationRequired
             calibrationRequired = true
+            if shouldPrompt { scheduleRecalibrationPrompt() }
             // Every center is relative to the same calibration session. A topology change
             // invalidates that entire session, including unchanged physical displays.
             pendingInvalidation.formUnion(stored.union(invalid))
@@ -660,6 +758,24 @@ final class AppController {
             && $0.halfWidth.radians > 0 }
     }
 
+    private func topologySupportMessage(for topology: DisplayTopology) -> String? {
+        guard topology.displays.allSatisfy(\.isPersistable) else {
+            return "Unsupported display layout: reconnect any display with an ambiguous identity, then recalibrate."
+        }
+        switch topology.support {
+        case .supported:
+            return nil
+        case .unsupported(.missingBuiltInDisplay):
+            return "Unsupported display layout: keep exactly one MacBook built-in display active, then recalibrate."
+        case .unsupported(.multipleBuiltInDisplays):
+            return "Unsupported display layout: exactly one active built-in display is required."
+        case .unsupported(.verticallyStacked):
+            return "Unsupported display layout: arrange displays horizontally without vertical stacking, then recalibrate."
+        case .unsupported(.overlapping):
+            return "Unsupported display layout: disable mirroring or overlap and arrange displays horizontally, then recalibrate."
+        }
+    }
+
     // Internal event-processing boundary; the lifetime task above owns stream consumption.
     func receive(_ event: MotionEvent) {
         guard started, !terminated, !sleeping else { return }
@@ -683,12 +799,16 @@ final class AppController {
         case .connectionChanged(false):
             if calibrationActive { abortCalibration("Headphones disconnected. Reconnect and restart calibration.") }
             referenceLost = true
+            let shouldPrompt = !calibrationRequired
             calibrationRequired = true
+            if shouldPrompt { scheduleRecalibrationPrompt() }
             if !userPaused { unavailable() }
         case .failed:
             if calibrationActive { abortCalibration("Motion failed. Restart calibration when headphones are ready.") }
             referenceLost = true
+            let shouldPrompt = !calibrationRequired
             calibrationRequired = true
+            if shouldPrompt { scheduleRecalibrationPrompt() }
             motion.captureReference()
             if !userPaused { unavailable() }
         case .connectionChanged(true):
@@ -780,6 +900,20 @@ final class AppController {
         // must not create another notification opportunity for the same unresolved outage.
     }
 
+    private func scheduleRecalibrationPrompt() {
+        guard started, !terminated, !permissionDenied, !calibrationActive,
+              !recalibrationPromptIssued, recalibrationPromptTask == nil else { return }
+        recalibrationPromptIssued = true
+        recalibrationPromptTask = Task { @MainActor [weak self] in
+            await Task.yield()
+            guard let self else { return }
+            defer { self.recalibrationPromptTask = nil }
+            guard !Task.isCancelled, !self.terminated, self.calibrationRequired,
+                  !self.permissionDenied, !self.calibrationActive else { return }
+            self.onRecalibrationRequested?()
+        }
+    }
+
     private func transition(_ state: ViewingState, status explicit: AppStatus? = nil) {
         let state: ViewingState = permissionDenied && state != .paused ? .unavailable : state
         viewingState = state
@@ -799,13 +933,31 @@ final class AppController {
 
     private func applyDecision(_ state: ViewingState) {
         let ids = ProtectionDecision.make(state: state, activeDisplays: Set(activeDisplays.map(\.id)), settings: settings)
-        if let lastApplication, lastApplication.0 == ids, lastApplication.1 == settings { return }
-        overlays.apply(protectedDisplayIDs: ids, settings: settings, animated: state != .paused)
-        lastApplication = (ids, settings)
+        let message = protectionStatusMessage(for: state, protectedDisplayIDs: ids)
+        if let lastApplication, lastApplication.0 == ids, lastApplication.1 == settings,
+           lastApplication.2 == message { return }
+        overlays.apply(protectedDisplayIDs: ids, settings: settings, animated: state != .paused,
+                       statusMessage: message)
+        lastApplication = (ids, settings, message)
+    }
+
+    private func protectionStatusMessage(for state: ViewingState,
+                                         protectedDisplayIDs: Set<DisplayID>) -> String? {
+        guard settings.failurePolicy == .protectionFirst, !protectedDisplayIDs.isEmpty,
+              !userPaused, !calibrationActive, !permissionDenied else { return nil }
+        switch state {
+        case .unavailable:
+            return "Head tracking is unavailable, so displays are protected. Use the configured shortcut or menu to pause or reveal all."
+        case .uncalibrated:
+            return "Calibration is required, so displays are protected. Use the configured shortcut or menu to pause or reveal all."
+        default:
+            return nil
+        }
     }
 
     isolated deinit {
         motionTask?.cancel(); displayTask?.cancel(); staleTask?.cancel(); notificationTask?.cancel()
+        recalibrationPromptTask?.cancel()
         motion.stop()
         hotkey.unregister()
     }

@@ -27,6 +27,8 @@ public struct DisplayDescriptor: Equatable, Sendable {
 }
 
 public enum UnsupportedDisplayTopology: Equatable, Sendable {
+    case missingBuiltInDisplay
+    case multipleBuiltInDisplays
     case verticallyStacked
     case overlapping
 }
@@ -114,6 +116,11 @@ public struct DisplayTopology: Equatable, Sendable {
     }
 
     private static func support(for displays: [DisplayDescriptor]) -> DisplayTopologySupport {
+        switch displays.lazy.filter(\.isBuiltIn).count {
+        case 0: return .unsupported(.missingBuiltInDisplay)
+        case 1: break
+        default: return .unsupported(.multipleBuiltInDisplays)
+        }
         for (index, display) in displays.enumerated() {
             for other in displays.dropFirst(index + 1) {
                 let verticalDistance = abs(display.frame.midY - other.frame.midY)

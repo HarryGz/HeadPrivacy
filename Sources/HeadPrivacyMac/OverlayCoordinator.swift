@@ -54,15 +54,17 @@ public final class OverlayCoordinator {
         }
     }
 
-    public func apply(protectedDisplayIDs requestedIDs: Set<DisplayID>, settings: AppSettings, animated: Bool) {
+    public func apply(protectedDisplayIDs requestedIDs: Set<DisplayID>, settings: AppSettings, animated: Bool,
+                      statusMessage: String? = nil) {
         let nextIDs = requestedIDs.intersection(windows.keys)
         // Reveal synchronously before any protection starts. Never fade a reveal while covering the old target.
         for (id, window) in windows where !nextIDs.contains(id) {
+            (window.contentView as? OverlayView)?.apply(settings: settings, statusMessage: nil)
             window.orderOut(nil)
             window.alphaValue = 1
         }
         for (id, window) in windows where nextIDs.contains(id) {
-            (window.contentView as? OverlayView)?.apply(settings: settings)
+            (window.contentView as? OverlayView)?.apply(settings: settings, statusMessage: statusMessage)
             guard !protectedDisplayIDs.contains(id) else { continue }
             let shouldAnimate = animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
             window.alphaValue = shouldAnimate ? 0 : 1

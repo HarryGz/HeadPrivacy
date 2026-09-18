@@ -47,6 +47,21 @@ final class DisplayRegistryTests: XCTestCase {
         XCTAssertEqual(topology.support, .unsupported(.overlapping))
     }
 
+    func testTopologyRequiresExactlyOneActiveBuiltInDisplay() {
+        // Break caught: claiming support on a desktop/external-only or ambiguous multi-built-in layout.
+        let externalOnly = DisplayTopology(displays: [
+            descriptor(id: "external-a", x: 0, isBuiltIn: false),
+            descriptor(id: "external-b", x: 1920, isBuiltIn: false),
+        ])
+        XCTAssertEqual(externalOnly.support, .unsupported(.missingBuiltInDisplay))
+
+        let multipleBuiltIn = DisplayTopology(displays: [
+            descriptor(id: "built-in-a", x: 0, isBuiltIn: true),
+            descriptor(id: "built-in-b", x: 1920, isBuiltIn: true),
+        ])
+        XCTAssertEqual(multipleBuiltIn.support, .unsupported(.multipleBuiltInDisplays))
+    }
+
     func testTopologyInvalidatesCalibrationWhoseDisplayIDOrOriginChanged() {
         // Break caught: retaining a calibration after its display was replaced or moved.
         let calibrations = [calibration(id: "left"), calibration(id: "right")]
@@ -153,12 +168,13 @@ final class DisplayRegistryTests: XCTestCase {
         XCTAssertEqual(registry.invalidCalibrationIDs(for: calibrations), [DisplayID(rawValue: "left")])
     }
 
-    private func descriptor(id: String, x: CGFloat, y: CGFloat = 0) -> DisplayDescriptor {
+    private func descriptor(id: String, x: CGFloat, y: CGFloat = 0,
+                            isBuiltIn: Bool? = nil) -> DisplayDescriptor {
         DisplayDescriptor(
             id: .init(rawValue: id),
             name: id,
             frame: .init(x: x, y: y, width: 100, height: 100),
-            isBuiltIn: false,
+            isBuiltIn: isBuiltIn ?? (id == "left" || id == "first" || id == "lower"),
             isPersistable: true
         )
     }

@@ -16,6 +16,9 @@ public enum OverlayLayout {
 @MainActor
 public final class OverlayView: NSView {
     private var settings = AppSettings.defaults
+    private var protectionViews: [NSVisualEffectView] = []
+    private(set) var statusMessage: String?
+    private(set) var statusPanel: NSView?
 
     public override var isOpaque: Bool { false }
 
@@ -29,7 +32,7 @@ public final class OverlayView: NSView {
         apply(settings: .defaults)
     }
 
-    public func apply(settings: AppSettings) {
+    public func apply(settings: AppSettings, statusMessage: String? = nil) {
         var validated = settings.validated()
         // Public mutable settings can contain non-finite values even though JSON cannot.
         if !validated.overlayOpacity.isFinite { validated.overlayOpacity = AppSettings.defaults.overlayOpacity }
@@ -46,8 +49,9 @@ public final class OverlayView: NSView {
         }
         let frames = OverlayLayout.frames(mode: validated.protectionMode, screenBounds: bounds,
                                           sideWidthFraction: validated.sideWidthFraction)
-        if subviews.count != frames.count {
-            subviews.forEach { $0.removeFromSuperview() }
+        if protectionViews.count != frames.count {
+            protectionViews.forEach { $0.removeFromSuperview() }
+            protectionViews.removeAll()
             for _ in frames {
                 let effect = NSVisualEffectView()
                 effect.blendingMode = .behindWindow
@@ -56,9 +60,10 @@ public final class OverlayView: NSView {
                 tint.wantsLayer = true
                 effect.addSubview(tint)
                 addSubview(effect)
+                protectionViews.append(effect)
             }
         }
-        for case let effect as NSVisualEffectView in subviews {
+        for effect in protectionViews {
             effect.material = material
             // Brightness -1...1 maps to black...white; zero is neutral gray.
             effect.subviews.first?.layer?.backgroundColor = NSColor(
@@ -66,6 +71,7 @@ public final class OverlayView: NSView {
                 alpha: validated.overlayOpacity * tintStrength
             ).cgColor
         }
+        updateStatus(statusMessage)
         needsLayout = true
         layoutSubtreeIfNeeded()
     }
@@ -74,9 +80,15 @@ public final class OverlayView: NSView {
         super.layout()
         let frames = OverlayLayout.frames(mode: settings.protectionMode, screenBounds: bounds,
                                           sideWidthFraction: settings.sideWidthFraction)
-        for (effect, frame) in zip(subviews, frames) {
+        for (effect, frame) in zip(protectionViews, frames) {
             effect.frame = frame
             effect.subviews.first?.frame = effect.bounds
+        }
+        if let statusPanel {
+            let width = max(0, min(bounds.width - 48, 460))
+            statusPanel.frame = CGRect(x: bounds.midX - width / 2, y: bounds.midY - 46,
+                                       width: width, height: 92)
+            statusPanel.subviews.first?.frame = statusPanel.bounds.insetBy(dx: 20, dy: 14)
         }
     }
 
@@ -86,4 +98,32 @@ public final class OverlayView: NSView {
     }
 
     public override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    private func updateStatus(_ message: String?) {
+        statusMessage = message
+        guard let message else {
+            statusPanel?.removeFromSuperview()
+            statusPanel = nil
+            return
+        }
+        let panel = statusPanel ?? {
+            let panel = NSView()
+            panel.wantsLayer = true
+            panel.layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.92).cgColor
+            panel.layer?.cornerRadius = 14
+            let label = NSTextField(wrappingLabelWithString: "")
+            label.alignment = .center
+            label.font = .systemFont(ofSize: 15, weight: .semibold)
+            label.textColor = .labelColor
+            panel.addSubview(label)
+            addSubview(panel)
+            statusPanel = panel
+            return panel
+        }()
+        // Protection panes may be rebuilt after an appearance-mode change; keep the
+        // explanation above those newly inserted material views.
+        panel.removeFromSuperview()
+        addSubview(panel)
+        (panel.subviews.first as? NSTextField)?.stringValue = message
+    }
 }

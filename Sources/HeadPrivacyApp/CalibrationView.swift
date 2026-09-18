@@ -12,6 +12,11 @@ struct CalibrationHighlightPresentation: Equatable {
 
     init?(flow: CalibrationFlowState?, displays: [DisplayDescriptor], stability: Double) {
         switch flow {
+        case .ready(let display, let index, let total):
+            frame = display.frame
+            displayName = display.name
+            step = "Display \(index) of \(total) — ready"
+            self.stability = nil
         case .sampling(let display, let index, let total):
             frame = display.frame
             displayName = display.name
@@ -40,6 +45,11 @@ struct CalibrationView: View {
                 Text("Protection is paused while you calibrate.").foregroundStyle(.secondary)
                 Text("All display centers are revalidated. Calibration is needed after each launch because the head reference cannot be restored.").font(.callout)
                 Button("Begin", action: controller.startCalibrationSampling)
+            case .ready(let display, let index, let total):
+                Text("Display \(index) of \(total): \(display.name)").font(.headline)
+                Text("Turn to the highlighted display. Sampling will not begin until you confirm you are looking at its center.")
+                Button("I'm Looking Here — Start Sampling", action: controller.startCalibrationSampling)
+                    .buttonStyle(.borderedProminent)
             case .sampling(let display, let index, let total):
                 Text("Display \(index) of \(total): \(display.name)").font(.headline)
                 Text("Look at the highlighted display’s center and hold still.")

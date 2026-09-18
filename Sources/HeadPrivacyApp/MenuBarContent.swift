@@ -12,11 +12,16 @@ struct MenuBarContent: View {
         if controller.isCalibrationActive { Text("Calibration in progress") }
         if let error = controller.serviceError { Text(error) }
         Divider()
-        Button(controller.isPaused ? "Resume Protection" : "Pause Protection", action: controller.togglePause)
-            .disabled(!controller.canControlProtection)
+        if controller.isPaused {
+            Button("Resume Protection", action: controller.togglePause)
+                .disabled(!controller.canResumeProtection)
+        } else {
+            Button("Pause Protection", action: controller.togglePause)
+                .disabled(!controller.canPauseProtection)
+        }
         if let shortcut = controller.registeredHotkey { Text("Global shortcut: \(shortcut.displayLabel)") }
         Button("Temporarily Reveal All", action: controller.temporarilyRevealAll)
-            .disabled(!controller.canControlProtection)
+            .disabled(!controller.canTemporarilyRevealAll)
         if controller.needsMotionPermission {
             Button("Retry Motion Access", action: controller.retryMotionPermission)
             Button("Motion Access Help…", action: showSettings)

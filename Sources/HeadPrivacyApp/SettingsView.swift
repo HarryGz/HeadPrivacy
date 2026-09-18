@@ -95,7 +95,8 @@ struct SettingsView: View {
     private var displays: some View {
         Form {
             Text(controller.statusText).font(.headline)
-            Text("Recalibrate after each launch: saved angles cannot restore the physical head reference. Each recalibration revalidates all display centers.").font(.callout)
+            Text("After launch, wake, disconnection, or a display-layout change, use full recalibration to establish a safe reference. While tracking and the full layout remain valid, you can recalibrate one display without changing the others.").font(.callout)
+            Button("Recalibrate All Display Centers…", action: controller.requestRecalibration)
             ForEach(controller.displayCalibrationSummaries) { summary in
                 Section(summary.display.name) {
                     Text(summary.display.id.rawValue).font(.caption).textSelection(.enabled)
@@ -105,7 +106,10 @@ struct SettingsView: View {
                         get: { summary.halfWidthDegrees ?? controller.settings.zoneHalfWidth.degrees },
                         set: { _ = controller.updateDisplayWidth(summary.id, degrees: $0) }), range: 5...90, step: 1)
                         .disabled(!summary.isCalibrated || controller.isCalibrationActive)
-                    Button("Recalibrate All Display Centers…", action: controller.requestRecalibration)
+                    Button("Recalibrate This Display…") {
+                        controller.requestDisplayRecalibration(summary.id)
+                    }
+                    .disabled(!controller.canRecalibrateDisplay(summary.id))
                 }
             }
             if controller.activeDisplays.isEmpty { Text("No active displays.") }
