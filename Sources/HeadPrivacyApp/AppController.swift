@@ -264,8 +264,10 @@ final class AppController {
     func temporarilyRevealAll() { pause() }
 
     func requestRecalibration() {
-        pause()
-        calibrationRequired = true
+        if !calibrationActive {
+            calibrationRequired = true
+            beginCalibration()
+        }
         onRecalibrationRequested?()
     }
 

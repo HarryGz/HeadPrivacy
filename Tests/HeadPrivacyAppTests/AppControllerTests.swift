@@ -42,6 +42,107 @@ final class AppControllerTests: XCTestCase {
         f.controller.shutdown()
     }
 
+    func testProtectionFirstRecoveryPromptsDoNotBeginCalibrationOrRevealCoverage() async {
+        // Break caught: merely fronting a runtime recovery prompt calls beginCalibration(),
+        // which pauses Protection-first and clears every protected display.
+        for trigger in ["failure", "disconnect", "topology"] {
+            let f = Fixture(policy: .protectionFirst)
+            let presenter = CalibrationWindowController(controller: f.controller)
+            f.controller.onRecalibrationRequested = { presenter.present() }
+            await f.controller.start()
+
+            switch trigger {
+            case "failure": f.controller.receive(.failed(.motionFailed("lost")))
+            case "disconnect": f.controller.receive(.connectionChanged(false))
+            default: f.displays.change(to: Array(f.displays.displays.dropLast()))
+            }
+            await drain()
+
+            XCTAssertNil(f.controller.calibrationFlow, trigger)
+            XCTAssertEqual(f.overlays.last, Set(f.displays.displays.map { $0.id.rawValue }), trigger)
+            XCTAssertNotNil(f.overlays.lastMessage, trigger)
+            let panel = try? XCTUnwrap(presenter.window)
+            XCTAssertGreaterThan(panel?.level.rawValue ?? 0, NSWindow.Level.screenSaver.rawValue, trigger)
+            XCTAssertTrue(panel?.styleMask.contains(.nonactivatingPanel) == true, trigger)
+
+            presenter.close()
+            XCTAssertNil(f.controller.calibrationFlow, trigger)
+            XCTAssertEqual(f.overlays.last, Set(f.displays.displays.map { $0.id.rawValue }), trigger)
+            f.controller.shutdown()
+        }
+    }
+
+    func testInitialLaunchPresentationDoesNotBeginCalibrationOrRevealProtectionFirst() async throws {
+        // Break caught: the launch delegate's unconditional presentation silently enters
+        // calibration and turns a fail-closed launch into an unprotected one.
+        let f = Fixture(policy: .protectionFirst)
+        let presenter = CalibrationWindowController(controller: f.controller)
+        await f.controller.start(requireCalibration: true)
+
+        presenter.present()
+
+        XCTAssertNil(f.controller.calibrationFlow)
+        XCTAssertEqual(f.controller.status, .calibrationRequired)
+        XCTAssertEqual(f.overlays.last, ["left", "center", "right"])
+        XCTAssertNotNil(f.overlays.lastMessage)
+        XCTAssertGreaterThan(try XCTUnwrap(presenter.window).level.rawValue,
+                             NSWindow.Level.screenSaver.rawValue)
+        presenter.close()
+        f.controller.shutdown()
+    }
+
+    func testExplicitFullCalibrationStartPausesAndRevealsProtection() async {
+        // Break caught: separating presentation from calibration also makes the explicit
+        // Start Full Calibration action a no-op.
+        let f = Fixture(policy: .protectionFirst)
+        await f.controller.start(requireCalibration: true)
+        XCTAssertEqual(f.overlays.last, ["left", "center", "right"])
+
+        f.controller.beginCalibration()
+
+        XCTAssertEqual(f.controller.calibrationFlow, .intro)
+        XCTAssertEqual(f.controller.status, .paused)
+        XCTAssertEqual(f.overlays.last, [])
+        f.controller.shutdown()
+    }
+
+    func testManualRecalibrateStartsFullFlowBeforePresenting() async {
+        // Break caught: moving beginCalibration() out of present() makes the menu and
+        // Settings Recalibrate actions show an idle prompt instead of preserving one-click intent.
+        let f = Fixture(policy: .protectionFirst)
+        let presenter = CalibrationWindowController(controller: f.controller)
+        f.controller.onRecalibrationRequested = { presenter.present() }
+        await f.controller.start()
+
+        f.controller.requestRecalibration()
+
+        XCTAssertEqual(f.controller.calibrationFlow, .intro)
+        XCTAssertEqual(f.controller.status, .paused)
+        XCTAssertEqual(f.overlays.last, [])
+        XCTAssertNotNil(presenter.window)
+        presenter.close()
+        f.controller.shutdown()
+    }
+
+    func testIndividualRecalibrationPresentationKeepsReadyStateAndReference() async {
+        // Break caught: a production presenter callback replaces a prepared one-display
+        // transaction with full calibration and captures a new reference.
+        let f = Fixture()
+        let presenter = CalibrationWindowController(controller: f.controller)
+        f.controller.onRecalibrationRequested = { presenter.present() }
+        await f.controller.start()
+        let references = f.motion.references
+
+        f.controller.requestDisplayRecalibration(.init(rawValue: "center"))
+
+        XCTAssertEqual(f.controller.calibrationFlow,
+            .ready(display: f.displays.displays[1], index: 1, total: 1))
+        XCTAssertEqual(f.motion.references, references)
+        XCTAssertNotNil(presenter.window)
+        presenter.close()
+        f.controller.shutdown()
+    }
+
     func testRuntimeTopologyInvalidationRequestsOneDeferredRecalibrationPrompt() async {
         // Break caught: an unsafe hot-plug leaves the menu status changed but never opens recovery UI.
         let f = Fixture()
@@ -1302,7 +1403,10 @@ final class AppControllerTests: XCTestCase {
         f.controller.onRecalibrationRequested = { requested = true }
         f.controller.requestRecalibration()
         XCTAssertTrue(requested)
+        XCTAssertEqual(f.controller.calibrationFlow, .intro)
+        XCTAssertEqual(f.controller.status, .paused)
         XCTAssertEqual(f.overlays.last, [])
+        f.controller.cancelCalibration()
         f.controller.resume()
         XCTAssertEqual(f.controller.status, .calibrationRequired)
         await f.sample(0, at: .zero)

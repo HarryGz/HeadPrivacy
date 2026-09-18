@@ -71,12 +71,15 @@ struct CalibrationView: View {
             if let error = controller.calibrationError {
                 Text(error).foregroundStyle(.red).font(.callout)
             }
-            if controller.calibrationFlow != .complete {
+            if controller.isCalibrationActive {
                 HStack {
                     Button("Restart", action: controller.restartCalibration)
                     Spacer()
                     Button("Cancel", action: controller.cancelCalibration)
                 }
+            } else if controller.calibrationFlow != .complete {
+                Button("Start Full Calibration", action: controller.beginCalibration)
+                    .buttonStyle(.borderedProminent)
             }
         }
         .padding(24)
@@ -103,7 +106,7 @@ final class CalibrationWindowController: NSWindowController, NSWindowDelegate {
         panel.title = "Calibrate Displays"
         panel.isReleasedWhenClosed = false
         panel.hidesOnDeactivate = false
-        panel.level = .floating
+        panel.level = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 1)
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         window = panel
         panel.delegate = self
@@ -115,8 +118,6 @@ final class CalibrationWindowController: NSWindowController, NSWindowDelegate {
 
     func present() {
         if window == nil { createWindow() }
-        if controller.isCalibrationActive { window?.orderFrontRegardless(); return }
-        controller.beginCalibration()
         window?.orderFrontRegardless()
     }
 
