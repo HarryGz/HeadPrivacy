@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import HeadPrivacyCore
 
@@ -27,7 +28,10 @@ struct MenuBarContent: View {
     }
 
     private func showSettings() {
-        controller.onSettingsRequested = { openSettings() }
+        controller.onSettingsRequested = {
+            NSApplication.shared.activate()
+            openSettings()
+        }
         controller.openSettings()
     }
 }

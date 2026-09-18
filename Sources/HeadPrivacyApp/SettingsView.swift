@@ -24,6 +24,9 @@ struct SettingsView: View {
     private var general: some View {
         Form {
             Toggle("Launch at login", isOn: binding(\.launchAtLogin))
+            if controller.hotkeyError != nil || controller.loginItemError != nil {
+                Button("Retry System Integration") { Task { await controller.retrySystemIntegrations() } }
+            }
             Toggle("Notify when head motion is interrupted", isOn: binding(\.notificationsEnabled))
             Button("Allow Notifications…") { Task { await controller.requestNotificationAuthorization() } }
                 .disabled(!controller.settings.notificationsEnabled)

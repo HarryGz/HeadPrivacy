@@ -73,12 +73,15 @@ final class AppController {
     private(set) var currentDisplayName: String?
     private(set) var calibrationRequired = true
     private var operationError: String?
+    private var displayWidthError: String?
+    private var notificationAuthorizationError: String?
     private(set) var hotkeyError: String?
     private(set) var loginItemError: String?
     private(set) var registeredHotkey: HotkeyDescriptor?
     private(set) var serviceError: String? {
         get {
-            let errors = [operationError, hotkeyError, loginItemError].compactMap { $0 }
+            let errors = [operationError, displayWidthError, notificationAuthorizationError,
+                          hotkeyError, loginItemError].compactMap { $0 }
             return errors.isEmpty ? nil : errors.joined(separator: "\n")
         }
         set { operationError = newValue }
@@ -135,6 +138,8 @@ final class AppController {
     private var displayTask: Task<Void, Never>?
     private var staleTask: Task<Void, Never>?
     private var notificationTask: Task<Void, Never>?
+    private var loginReconciliationTask: Task<Void, Never>?
+    private var loginRevision = 0
     private var started = false
     private var terminated = false
     private var userPaused = false
@@ -202,7 +207,9 @@ final class AppController {
             }
         }
         resume()
-        await configureServices()
+        notifications.isEnabled = settings.notificationsEnabled
+        configureHotkey()
+        await reconcileLoginItem()
     }
 
     func pause() {
@@ -449,7 +456,9 @@ final class AppController {
         if viewingState == .unavailable, status == .headphonesUnavailable || status == .permissionRequired {
             unavailable(status: status)
         }
-        await configureServices()
+        guard started else { return }
+        if old.hotkeyDescriptor != settings.hotkeyDescriptor { configureHotkey() }
+        if old.launchAtLogin != settings.launchAtLogin { await reconcileLoginItem() }
     }
 
     /// Explicit per-display edits persist one complete set and retain the shared centers.
@@ -458,30 +467,37 @@ final class AppController {
         guard started, !terminated, !calibrationActive, !calibrationRequired, degrees.isFinite,
               DisplayTopology(displays: displays.displays).signature == topology?.signature,
               let index = calibrations.firstIndex(where: { $0.displayID == id }) else {
-            serviceError = "Calibrate the current display arrangement before editing its viewing zones."
+            displayWidthError = "Calibrate the current display arrangement before editing its viewing zones."
             return false
         }
         var updated = calibrations
         updated[index].halfWidth = .init(degrees: min(90, max(5, degrees)))
         do { try calibrationStore.save(updated) }
-        catch { serviceError = "Could not save viewing zone: \(error)"; return false }
+        catch { displayWidthError = "Could not save viewing zone: \(error)"; return false }
         guard DisplayTopology(displays: displays.displays).signature == topology?.signature else {
             refreshTopology()
-            serviceError = "Displays changed. Recalibrate before editing viewing zones."
+            displayWidthError = "Displays changed. Recalibrate before editing viewing zones."
             return false
         }
         calibrations = updated
+        displayWidthError = nil
         configureDetection()
         return true
     }
 
     /// Only the explicit Settings button calls this; enabling the preference never prompts.
     func requestNotificationAuthorization() async {
+        guard !terminated else { return }
         do {
             let granted = try await notifications.requestAuthorizationFromSettings()
+            guard !terminated else { return }
+            notificationAuthorizationError = nil
             notificationAuthorizationMessage = granted ? "Notifications allowed."
                 : "Enable notifications in System Settings → Notifications → HeadPrivacy."
-        } catch { serviceError = "Could not request notifications: \(error)" }
+        } catch {
+            guard !terminated else { return }
+            notificationAuthorizationError = "Could not request notifications: \(error)"
+        }
     }
 
     func shutdown() {
@@ -495,13 +511,21 @@ final class AppController {
         motionTask?.cancel(); motionTask = nil
         displayTask?.cancel(); displayTask = nil
         invalidateQueuedNotification()
+        loginReconciliationTask?.cancel()
+        loginReconciliationTask = nil
         hotkey.unregister()
         registeredHotkey = nil
         overlays.reconcile(displays: [])
     }
 
-    private func configureServices() async {
-        notifications.isEnabled = settings.notificationsEnabled
+    /// Unrelated settings never retry integrations or replace a healthy shortcut registration.
+    func retrySystemIntegrations() async {
+        guard started, !terminated else { return }
+        if hotkeyError != nil { configureHotkey() }
+        if loginItemError != nil { await reconcileLoginItem() }
+    }
+
+    private func configureHotkey() {
         do {
             try hotkey.register(settings.hotkeyDescriptor) { [weak self] in self?.togglePause() }
             registeredHotkey = settings.hotkeyDescriptor
@@ -513,15 +537,39 @@ final class AppController {
             } else { registeredHotkey = nil }
             hotkeyError = "Could not register shortcut: \(error)"
         }
-        do {
-            try await loginItem.setEnabled(settings.launchAtLogin)
-            loginItemError = nil
-            if settings.launchAtLogin, loginItem.status == .requiresApproval {
-                loginItemError = "Approve HeadPrivacy in System Settings → General → Login Items."
-            } else if settings.launchAtLogin, loginItem.status == .unavailable {
-                loginItemError = "Launch at login is unavailable. Use the installed HeadPrivacy app bundle."
+    }
+
+    private func reconcileLoginItem() async {
+        loginRevision += 1
+        if let task = loginReconciliationTask {
+            await task.value
+            return
+        }
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.loginReconciliationTask = nil }
+            while !self.terminated, !Task.isCancelled {
+                let revision = self.loginRevision
+                let enabled = self.settings.launchAtLogin
+                var errorMessage: String?
+                do {
+                    try await self.loginItem.setEnabled(enabled)
+                    if enabled, self.loginItem.status == .requiresApproval {
+                        errorMessage = "Approve HeadPrivacy in System Settings → General → Login Items."
+                    } else if enabled, self.loginItem.status == .unavailable {
+                        errorMessage = "Launch at login is unavailable. Use the installed HeadPrivacy app bundle."
+                    }
+                } catch { errorMessage = "Could not update login item: \(error)" }
+                guard !self.terminated, !Task.isCancelled else { return }
+                // A suspended unregister can finish after newer preferences have been saved.
+                // Complete it before applying the newest intent, and publish only its outcome.
+                guard revision == self.loginRevision else { continue }
+                self.loginItemError = errorMessage
+                return
             }
-        } catch { loginItemError = "Could not update login item: \(error)" }
+        }
+        loginReconciliationTask = task
+        await task.value
     }
 
     private func configureDetection() {

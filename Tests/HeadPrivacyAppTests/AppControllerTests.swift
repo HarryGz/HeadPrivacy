@@ -7,6 +7,102 @@ import HeadPrivacyMac
 
 @MainActor
 final class AppControllerTests: XCTestCase {
+    func testUnrelatedSettingsPreserveHotkeyRegistrationAndQueuedActiveEvent() async {
+        let f = Fixture()
+        await f.controller.start()
+        let queuedShortcut = f.hotkey.queuedActiveEvent()
+        let changes: [(inout AppSettings) -> Void] = [
+            { $0.overlayOpacity = 0.8 }, { $0.filterAlpha = 0.5 },
+            { $0.failurePolicy = .protectionFirst }, { $0.notificationsEnabled = false },
+            { $0.launchAtLogin = true },
+        ]
+        for change in changes {
+            var settings = f.controller.settings
+            change(&settings)
+            await f.controller.updateSettings(settings)
+        }
+        XCTAssertTrue(f.controller.updateDisplayWidth(.init(rawValue: "center"), degrees: 30))
+        XCTAssertEqual(f.hotkey.registrations.count, 1)
+        XCTAssertEqual(f.hotkey.unregistrations, 0)
+        queuedShortcut()
+        XCTAssertEqual(f.controller.status, .paused)
+        var settings = f.controller.settings
+        settings.hotkeyDescriptor.key = "K"
+        await f.controller.updateSettings(settings)
+        XCTAssertEqual(f.hotkey.registrations.count, 2)
+        XCTAssertEqual(f.controller.registeredHotkey?.key, "K")
+        f.controller.shutdown()
+    }
+
+    func testLoginOffThenOnSerializesAndDiscardsOlderCompletionOrError() async {
+        for failure in [false, true] {
+            let f = Fixture()
+            f.preferences.settings.launchAtLogin = true
+            await f.controller.start()
+            f.login.suspendUnregister = true
+            var off = f.controller.settings
+            off.launchAtLogin = false
+            let offTask = Task { [off] in await f.controller.updateSettings(off) }
+            await drain()
+            XCTAssertNotNil(f.login.unregisterContinuation)
+            var on = f.controller.settings
+            on.launchAtLogin = true
+            let onTask = Task { [on] in await f.controller.updateSettings(on) }
+            await drain()
+            XCTAssertEqual(f.login.requests, [true, false], "Only one operation may be in flight")
+            f.login.completeUnregister(failing: failure)
+            await offTask.value
+            await onTask.value
+            XCTAssertEqual(f.login.requests, [true, false, true])
+            XCTAssertTrue(f.login.isEnabled)
+            XCTAssertTrue(f.controller.settings.launchAtLogin)
+            XCTAssertTrue(f.preferences.settings.launchAtLogin)
+            XCTAssertNil(f.controller.loginItemError)
+            XCTAssertNil(f.controller.serviceError)
+            f.controller.shutdown()
+        }
+    }
+
+    func testShutdownDiscardsPendingLoginIntentAndLateError() async {
+        let f = Fixture()
+        f.preferences.settings.launchAtLogin = true
+        await f.controller.start()
+        f.login.suspendUnregister = true
+        var off = f.controller.settings
+        off.launchAtLogin = false
+        let offTask = Task { [off] in await f.controller.updateSettings(off) }
+        await drain()
+        var on = f.controller.settings
+        on.launchAtLogin = true
+        let onTask = Task { [on] in await f.controller.updateSettings(on) }
+        await drain()
+        f.controller.shutdown()
+        f.login.completeUnregister(failing: true)
+        await offTask.value
+        await onTask.value
+        XCTAssertEqual(f.login.requests, [true, false])
+        XCTAssertNil(f.controller.loginItemError)
+        XCTAssertNil(f.controller.registeredHotkey)
+    }
+
+    func testSuccessfulWidthAndNotificationActionsClearTheirPreviousOperationErrors() async {
+        let f = Fixture()
+        await f.controller.start()
+        f.calibrations.shouldFail = true
+        XCTAssertFalse(f.controller.updateDisplayWidth(.init(rawValue: "center"), degrees: 30))
+        XCTAssertNotNil(f.controller.serviceError)
+        f.calibrations.shouldFail = false
+        XCTAssertTrue(f.controller.updateDisplayWidth(.init(rawValue: "center"), degrees: 30))
+        XCTAssertNil(f.controller.serviceError)
+        f.notifications.shouldFail = true
+        await f.controller.requestNotificationAuthorization()
+        XCTAssertNotNil(f.controller.serviceError)
+        f.notifications.shouldFail = false
+        await f.controller.requestNotificationAuthorization()
+        XCTAssertNil(f.controller.serviceError)
+        f.controller.shutdown()
+    }
+
     func testGuidedRevalidationPreservesSavedWidthsForExistingDisplayIdentities() async {
         let f = Fixture()
         f.calibrations.values[1].halfWidth = .init(degrees: 40)
@@ -40,6 +136,11 @@ final class AppControllerTests: XCTestCase {
         f.hotkey.shouldFail = false
         f.login.shouldFail = false
         await f.controller.updateSettings(f.controller.settings)
+        XCTAssertNotNil(f.controller.hotkeyError)
+        XCTAssertNotNil(f.controller.loginItemError)
+        XCTAssertEqual(f.hotkey.registrations.count, 1)
+        XCTAssertEqual(f.login.requests.count, 1)
+        await f.controller.retrySystemIntegrations()
         XCTAssertNil(f.controller.hotkeyError)
         XCTAssertNil(f.controller.loginItemError)
         XCTAssertNil(f.controller.serviceError)
@@ -993,16 +1094,48 @@ final class AppDependencyFactoryTests: XCTestCase {
 @MainActor private final class HotkeyFake: GlobalHotKeyRegistering {
     var handler: (@MainActor () -> Void)?
     var shouldFail = false
+    var registrations: [HotkeyDescriptor] = []
+    var unregistrations = 0
+    private var eventID = 0
     func register(_ descriptor: HotkeyDescriptor, handler: @escaping @MainActor () -> Void) throws {
+        registrations.append(descriptor)
+        eventID += 1
         if shouldFail { throw TestError.unavailable }; self.handler = handler
     }
-    func unregister() { handler = nil }
+    func unregister() { unregistrations += 1; eventID += 1; handler = nil }
+    func queuedActiveEvent() -> @MainActor () -> Void {
+        let id = eventID
+        return { [weak self] in
+            guard let self, self.eventID == id else { return }
+            self.handler?()
+        }
+    }
 }
 @MainActor private final class LoginFake: LoginItemControlling {
     var status: LoginItemStatus = .notRegistered
     var isEnabled = false
     var shouldFail = false
-    func setEnabled(_ enabled: Bool) async throws { if shouldFail { throw TestError.unavailable }; isEnabled = enabled }
+    var requests: [Bool] = []
+    var suspendUnregister = false
+    var unregisterContinuation: CheckedContinuation<Void, any Error>?
+    func setEnabled(_ enabled: Bool) async throws {
+        requests.append(enabled)
+        if shouldFail { throw TestError.unavailable }
+        guard enabled != isEnabled else { return }
+        if !enabled, suspendUnregister {
+            try await withCheckedThrowingContinuation { unregisterContinuation = $0 }
+        }
+        isEnabled = enabled
+        status = enabled ? .enabled : .notRegistered
+    }
+    func completeUnregister(failing: Bool) {
+        let continuation = unregisterContinuation
+        unregisterContinuation = nil
+        isEnabled = false
+        status = .notRegistered
+        if failing { continuation?.resume(throwing: TestError.unavailable) }
+        else { continuation?.resume() }
+    }
 }
 @MainActor private final class TimingFake: AppControllerTiming {
     var time: Duration = .zero
