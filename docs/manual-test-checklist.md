@@ -30,7 +30,7 @@
 
 | 检查 | 证据 | 状态 |
 |---|---|---|
-| Swift 测试套件 | `swift test --disable-sandbox`：144 tests，0 failures；2026-09-18 | PASS |
+| Swift 测试套件 | `swift test --disable-sandbox`：148 tests，0 failures；2026-09-18 | PASS |
 | arm64 Release app bundle | `./Scripts/build-app.sh`：exit 0，产物为 `build/HeadPrivacy.app`；2026-09-18 | PASS |
 | Info.plist 语法 | `plutil -lint build/HeadPrivacy.app/Contents/Info.plist`：`OK` | PASS |
 | ad-hoc 签名完整性 | `codesign --verify --deep --strict --verbose=2 build/HeadPrivacy.app`：`valid on disk`、`satisfies its Designated Requirement` | PASS |

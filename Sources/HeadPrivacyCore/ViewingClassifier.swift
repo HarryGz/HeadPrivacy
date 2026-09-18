@@ -81,6 +81,11 @@ public struct ViewingClassifier: Sendable {
         }
 
         guard candidateState == state, let candidateSince else {
+            if dwell(for: state) <= .zero {
+                committedState = state
+                clearCandidate()
+                return committedState
+            }
             candidateState = state
             self.candidateSince = timestamp
             return committedState

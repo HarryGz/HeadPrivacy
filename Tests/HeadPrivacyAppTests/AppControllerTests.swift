@@ -274,8 +274,9 @@ final class AppControllerTests: XCTestCase {
         f.controller.shutdown()
     }
 
-    func testProtectionStatusMessageIsAbsentForNormalProtectionPauseAndPermissionDenial() async {
-        // Break caught: the recovery explanation appears during normal viewing or unsafe permission UI.
+    func testPermissionDenialClearsProtectionFirstOverlaysAndSettingsCannotRestoreThem() async {
+        // Break caught: denied Motion access inherits Protection-first and obscures displays
+        // while the normal pause/reveal controls are deliberately disabled.
         let f = Fixture(policy: .protectionFirst)
         await f.controller.start()
         await f.sample(0, at: .zero)
@@ -284,10 +285,37 @@ final class AppControllerTests: XCTestCase {
         XCTAssertNil(f.overlays.lastMessage)
         f.controller.pause()
         XCTAssertNil(f.overlays.lastMessage)
+        f.controller.resume()
+        await f.sample(0, at: .milliseconds(200))
+        await f.sample(0, at: .milliseconds(300))
+        XCTAssertEqual(f.overlays.last, ["left", "right"])
         f.controller.receive(.authorizationChanged(.denied))
+        XCTAssertEqual(f.controller.status, .permissionRequired)
+        XCTAssertEqual(f.overlays.last, [])
         XCTAssertFalse(f.controller.canPauseProtection)
         XCTAssertFalse(f.controller.canTemporarilyRevealAll)
         XCTAssertFalse(f.controller.canResumeProtection)
+        XCTAssertNil(f.overlays.lastMessage)
+
+        f.controller.togglePause()
+        f.controller.temporarilyRevealAll()
+        f.controller.resume()
+        XCTAssertEqual(f.controller.status, .permissionRequired)
+        XCTAssertEqual(f.overlays.last, [])
+
+        var settings = f.controller.settings
+        settings.overlayOpacity = 0.9
+        await f.controller.updateSettings(settings)
+        XCTAssertEqual(f.overlays.last, [])
+        XCTAssertNil(f.overlays.lastMessage)
+
+        settings.failurePolicy = .usabilityFirst
+        await f.controller.updateSettings(settings)
+        XCTAssertEqual(f.overlays.last, [])
+        settings.failurePolicy = .protectionFirst
+        settings.visualPreset = .privacy
+        await f.controller.updateSettings(settings)
+        XCTAssertEqual(f.overlays.last, [])
         XCTAssertNil(f.overlays.lastMessage)
         f.controller.shutdown()
     }

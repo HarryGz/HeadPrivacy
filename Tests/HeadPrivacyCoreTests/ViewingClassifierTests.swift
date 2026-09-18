@@ -47,6 +47,23 @@ final class ViewingClassifierTests: XCTestCase {
         XCTAssertEqual(classifier.ingest(sample(yaw: 35, at: 201), calibrations: calibrations), .viewing(right.displayID))
     }
 
+    func testInitialViewingCommitsOnFirstSampleWhenSwitchDwellIsZero() {
+        var classifier = ViewingClassifier(configuration: .init(switchDwell: .zero))
+
+        XCTAssertEqual(
+            classifier.ingest(sample(yaw: -35, at: 0), calibrations: [left, center, right]),
+            .viewing(left.displayID)
+        )
+    }
+
+    func testDisplaySwitchCommitsOnFirstSampleWhenSwitchDwellIsZero() {
+        var classifier = ViewingClassifier(configuration: .init(switchDwell: .zero))
+        let calibrations = [left, center, right]
+        XCTAssertEqual(classifier.ingest(sample(yaw: -35, at: 0), calibrations: calibrations), .viewing(left.displayID))
+
+        XCTAssertEqual(classifier.ingest(sample(yaw: 35, at: 1), calibrations: calibrations), .viewing(right.displayID))
+    }
+
     func testCommittedDisplayDoesNotOverrideNearerOverlappingDisplay() {
         var classifier = ViewingClassifier()
         let calibrations = [left, center, right]
@@ -68,6 +85,14 @@ final class ViewingClassifierTests: XCTestCase {
         XCTAssertEqual(classifier.ingest(sample(yaw: 90, at: 221), calibrations: calibrations), .away)
     }
 
+    func testAwayCommitsOnFirstSampleWhenAwayDwellIsZero() {
+        var classifier = ViewingClassifier(configuration: .init(switchDwell: .zero, awayDwell: .zero))
+        let calibrations = [left, center, right]
+        XCTAssertEqual(classifier.ingest(sample(yaw: -35, at: 0), calibrations: calibrations), .viewing(left.displayID))
+
+        XCTAssertEqual(classifier.ingest(sample(yaw: 90, at: 1), calibrations: calibrations), .away)
+    }
+
     func testReturningToZoneBecomesViewingAfterReturnDwellExpires() {
         var classifier = ViewingClassifier()
         let calibrations = [left, center, right]
@@ -79,6 +104,19 @@ final class ViewingClassifierTests: XCTestCase {
         XCTAssertEqual(classifier.ingest(sample(yaw: 0, at: 222), calibrations: calibrations), .away)
         XCTAssertEqual(classifier.ingest(sample(yaw: 0, at: 321), calibrations: calibrations), .away)
         XCTAssertEqual(classifier.ingest(sample(yaw: 0, at: 322), calibrations: calibrations), .viewing(center.displayID))
+    }
+
+    func testReturnCommitsOnFirstSampleWhenReturnDwellIsZero() {
+        var classifier = ViewingClassifier(configuration: .init(
+            switchDwell: .zero,
+            awayDwell: .zero,
+            returnDwell: .zero
+        ))
+        let calibrations = [left, center, right]
+        XCTAssertEqual(classifier.ingest(sample(yaw: -35, at: 0), calibrations: calibrations), .viewing(left.displayID))
+        XCTAssertEqual(classifier.ingest(sample(yaw: 90, at: 1), calibrations: calibrations), .away)
+
+        XCTAssertEqual(classifier.ingest(sample(yaw: 0, at: 2), calibrations: calibrations), .viewing(center.displayID))
     }
 
     func testBoundaryJitterInsideHysteresisMarginDoesNotFlap() {

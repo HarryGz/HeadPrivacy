@@ -945,7 +945,11 @@ final class AppController {
     }
 
     private func applyDecision(_ state: ViewingState) {
-        let ids = ProtectionDecision.make(state: state, activeDisplays: Set(activeDisplays.map(\.id)), settings: settings)
+        let ids = permissionDenied ? [] : ProtectionDecision.make(
+            state: state,
+            activeDisplays: Set(activeDisplays.map(\.id)),
+            settings: settings
+        )
         let message = protectionStatusMessage(for: state, protectedDisplayIDs: ids)
         if let lastApplication, lastApplication.0 == ids, lastApplication.1 == settings,
            lastApplication.2 == message { return }
