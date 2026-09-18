@@ -1,4 +1,5 @@
 import Foundation
+import CoreMotion
 import Observation
 import HeadPrivacyCore
 import HeadPrivacyMac
@@ -155,6 +156,7 @@ final class AppController {
     private var motionRunning = false
     private var sleeping = false
     private var restartMotionAfterSleep = false
+    private var motionAuthorization: CMAuthorizationStatus = .notDetermined
     private var permissionDenied = false
     private var motionPermissionRetryPending = false
     private var outageNotified = false
@@ -298,6 +300,10 @@ final class AppController {
         overlays.reconcile(displays: activeDisplays)
         lastApplication = nil
         transition(.paused)
+        guard motionAuthorization != .restricted else {
+            abortCalibration("Motion access is restricted by a system-wide policy. Remove the restriction, then retry.")
+            return
+        }
         guard !permissionDenied else {
             abortCalibration("Motion access is unavailable. Allow HeadPrivacy in System Settings → Privacy & Security → Motion & Fitness, then retry.")
             return
@@ -802,6 +808,7 @@ final class AppController {
         switch event {
         case .authorizationChanged(let authorization):
             let wasDenied = permissionDenied
+            motionAuthorization = authorization
             permissionDenied = authorization == .denied || authorization == .restricted
             if permissionDenied {
                 motionPermissionRetryPending = false
