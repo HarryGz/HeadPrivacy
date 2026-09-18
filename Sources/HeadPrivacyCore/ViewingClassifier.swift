@@ -95,14 +95,15 @@ public struct ViewingClassifier: Sendable {
     }
 
     private func candidate(for yaw: Angle, calibrations: [DisplayCalibration]) -> ViewingState {
-        if case let .viewing(displayID) = committedState,
-           let committedCalibration = calibrations.first(where: { $0.displayID == displayID }),
-           isWithinZone(yaw, of: committedCalibration, expandedBy: configuration.hysteresis) {
-            return committedState
-        }
-
         let matchingCalibrations = calibrations.filter { calibration in
-            isWithinZone(yaw, of: calibration, expandedBy: .init(radians: 0))
+            let expansion: Angle
+            if case let .viewing(displayID) = committedState, calibration.displayID == displayID {
+                expansion = configuration.hysteresis
+            } else {
+                expansion = .init(radians: 0)
+            }
+
+            return isWithinZone(yaw, of: calibration, expandedBy: expansion)
         }
 
         guard let nearestCalibration = matchingCalibrations.min(by: { lhs, rhs in

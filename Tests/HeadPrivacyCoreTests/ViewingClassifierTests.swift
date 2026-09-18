@@ -47,6 +47,16 @@ final class ViewingClassifierTests: XCTestCase {
         XCTAssertEqual(classifier.ingest(sample(yaw: 35, at: 201), calibrations: calibrations), .viewing(right.displayID))
     }
 
+    func testCommittedDisplayDoesNotOverrideNearerOverlappingDisplay() {
+        var classifier = ViewingClassifier()
+        let calibrations = [left, center, right]
+
+        _ = classifier.ingest(sample(yaw: -35, at: 0), calibrations: calibrations)
+        XCTAssertEqual(classifier.ingest(sample(yaw: -35, at: 100), calibrations: calibrations), .viewing(left.displayID))
+        XCTAssertEqual(classifier.ingest(sample(yaw: -15, at: 101), calibrations: calibrations), .viewing(left.displayID))
+        XCTAssertEqual(classifier.ingest(sample(yaw: -15, at: 201), calibrations: calibrations), .viewing(center.displayID))
+    }
+
     func testNoDisplaySamplesBecomeAwayAfterAwayDwellExpires() {
         var classifier = ViewingClassifier()
         let calibrations = [left, center, right]
