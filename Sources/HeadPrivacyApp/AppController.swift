@@ -301,11 +301,11 @@ final class AppController {
         lastApplication = nil
         transition(.paused)
         guard motionAuthorization != .restricted else {
-            abortCalibration("Motion access is restricted by a system-wide policy. Remove the restriction, then retry.")
+            abortCalibration(motionAccessMessage(for: .restricted))
             return
         }
         guard !permissionDenied else {
-            abortCalibration("Motion access is unavailable. Allow HeadPrivacy in System Settings → Privacy & Security → Motion & Fitness, then retry.")
+            abortCalibration(motionAccessMessage(for: motionAuthorization))
             return
         }
         guard calibrationTopologyIsUsable(latest) else {
@@ -802,6 +802,13 @@ final class AppController {
         }
     }
 
+    private func motionAccessMessage(for authorization: CMAuthorizationStatus) -> String {
+        if authorization == .restricted {
+            return "Motion access is restricted by a system-wide policy. Remove the restriction, then retry."
+        }
+        return "Motion access is unavailable. Allow HeadPrivacy in System Settings → Privacy & Security → Motion & Fitness, then retry."
+    }
+
     // Internal event-processing boundary; the lifetime task above owns stream consumption.
     func receive(_ event: MotionEvent) {
         guard started, !terminated, !sleeping else { return }
@@ -812,7 +819,7 @@ final class AppController {
             permissionDenied = authorization == .denied || authorization == .restricted
             if permissionDenied {
                 motionPermissionRetryPending = false
-                if calibrationActive { abortCalibration("Motion permission was lost. Restore access and restart calibration.") }
+                if calibrationActive { abortCalibration(motionAccessMessage(for: authorization)) }
                 referenceLost = true
                 calibrationRequired = true
                 if !userPaused { unavailable(status: .permissionRequired) }

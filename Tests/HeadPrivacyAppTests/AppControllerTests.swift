@@ -482,6 +482,34 @@ final class AppControllerTests: XCTestCase {
         f.controller.shutdown()
     }
 
+    func testDeniedMotionExplainsExactRecoveryPathWhenResolvedAfterCalibrationStarts() async {
+        let f = Fixture()
+        f.motion.authorizationOnStart = .denied
+        await f.controller.start(requireCalibration: true)
+
+        f.controller.beginCalibration()
+        f.controller.startCalibrationSampling()
+        await drain()
+
+        XCTAssertEqual(f.controller.calibrationError,
+            "Motion access is unavailable. Allow HeadPrivacy in System Settings → Privacy & Security → Motion & Fitness, then retry.")
+        f.controller.shutdown()
+    }
+
+    func testRestrictedMotionExplainsSystemWidePolicyWhenResolvedAfterCalibrationStarts() async {
+        let f = Fixture()
+        f.motion.authorizationOnStart = .restricted
+        await f.controller.start(requireCalibration: true)
+
+        f.controller.beginCalibration()
+        f.controller.startCalibrationSampling()
+        await drain()
+
+        XCTAssertEqual(f.controller.calibrationError,
+            "Motion access is restricted by a system-wide policy. Remove the restriction, then retry.")
+        f.controller.shutdown()
+    }
+
     func testExternalOnlyRuntimeTopologyInvalidatesClassificationAndRequestsRecovery() async {
         // Break caught: a MacBook with its built-in screen disabled continues using stale centers.
         let f = Fixture(policy: .protectionFirst)
