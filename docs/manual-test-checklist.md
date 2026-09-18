@@ -12,7 +12,7 @@
 | CPU 架构 | arm64 |
 | AirPods 型号 / 固件 | NOT RECORDED |
 | 显示器型号 / 左右排列 | NOT RECORDED |
-| App commit / 版本 | `d5f59ff` / `0.1.0` |
+| App commit / 版本 | `fb139c1` / `0.1.0` |
 | 执行人 | NOT RECORDED |
 
 状态只能填写：
@@ -30,7 +30,7 @@
 
 | 检查 | 证据 | 状态 |
 |---|---|---|
-| Swift 测试套件 | `swift test --disable-sandbox`：154 tests，0 failures；2026-09-18 | PASS |
+| Swift 测试套件 | `swift test --disable-sandbox`：155 tests，0 failures；2026-09-18 | PASS |
 | arm64 Release app bundle | `./Scripts/build-app.sh`：exit 0，产物为 `build/HeadPrivacy.app`；2026-09-18 | PASS |
 | Info.plist 语法 | `plutil -lint build/HeadPrivacy.app/Contents/Info.plist`：`OK` | PASS |
 | ad-hoc 签名完整性 | `codesign --verify --deep --strict --verbose=2 build/HeadPrivacy.app`：`valid on disk`、`satisfies its Designated Requirement` | PASS |
@@ -39,7 +39,7 @@
 
 ## 硬件与 UI 验收
 
-本记录创建时没有可由自动化代理实际佩戴并转动的 AirPods，也没有可人工操作的多显示器桌面会话。因此下列各项均保持 `NOT RUN`；观察结果不得用单元测试推断填充。
+本记录创建时没有可由自动化代理实际佩戴并转动的 AirPods，也没有可人工操作的多显示器桌面会话。除 H38 的本机启动烟测外，涉及 AirPods、头部动作和多显示器的项目均保持 `NOT RUN`；观察结果不得用单元测试推断填充。
 
 | ID | 精确设置 | 操作 | 预期结果 | 实际结果 / 证据 | 延迟 | 状态 |
 |---|---|---|---|---|---|---|
@@ -80,6 +80,7 @@
 | H35 | 自动保护运行中 | 正常退出 app；另一次运行用可控方式终止进程模拟崩溃 | 两种情况下 overlay 随进程消失；文档明确这不是安全锁屏 | 未执行 | 记录窗口消失行为 | NOT RUN |
 | H36 | 已完成三屏校准且 tracking 正常；三台显示器区域宽度各不相同 | 在 Displays 设置对中间屏选择“Recalibrate This Display…”；显式确认后采样、验证并保存 | 不重新捕获 motion 参考；仅中间屏中心改变；三台区域宽度和其他两屏中心不变；取消一次后原校准仍可继续保护 | 未执行 | 不适用 | NOT RUN |
 | H37 | 已校准并运行；连接至少一台外接显示器 | 关闭 MacBook 内置显示器，进入仅外接布局；观察菜单/设置和校准入口 | 自动分类停止；显示“必须恰好一个 MacBook 内置显示器”的可操作错误；要求完整重校准且不允许单屏重校准 | 未执行 | 记录失效检测时间 | NOT RUN |
+| H38 | 停止旧进程；使用 `fb139c1` 构建新的本地 bundle | 在 Finder 双击 `build/HeadPrivacy.app` | 进程正常进入 AppKit 生命周期，不停在 SwiftUI `runApp` 初始化；显示 “Calibrate Displays” 窗口和 “Start Full Calibration” 操作 | 2026-09-18 22:22，经 Finder 启动后窗口可见且 CUA 可读取；未开始校准 | 不适用 | PASS |
 
 ## 结果处理
 
