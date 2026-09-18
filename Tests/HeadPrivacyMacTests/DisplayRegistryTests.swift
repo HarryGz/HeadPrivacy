@@ -91,6 +91,10 @@ final class DisplayRegistryTests: XCTestCase {
         let update = await changes.next()
 
         XCTAssertEqual(update?.map(\.id.rawValue), ["left", "right"])
+        XCTAssertEqual(update?.map(\.frame), [
+            .init(x: 0, y: 0, width: 100, height: 100),
+            .init(x: 1800, y: 0, width: 100, height: 100),
+        ])
         XCTAssertEqual(registry.topologySignature, DisplayTopology(displays: source.value).signature)
     }
 
@@ -109,6 +113,44 @@ final class DisplayRegistryTests: XCTestCase {
         XCTAssertEqual(registry.invalidCalibrationIDs(for: [calibration(id: "left"), calibration(id: "right")]), [
             DisplayID(rawValue: "right"),
         ])
+    }
+
+    @MainActor
+    func testRegistryRetainsInvalidationsAcrossSuccessiveTopologyChanges() {
+        // Break caught: replacing the prior topology hides a calibration invalidated by an earlier refresh.
+        let source = MutableDisplaySource([
+            descriptor(id: "left", x: 0),
+            descriptor(id: "right", x: 1920),
+        ])
+        let registry = DisplayRegistry(descriptorProvider: source.descriptors)
+
+        source.value = [descriptor(id: "left", x: 0), descriptor(id: "right", x: 1800)]
+        registry.refresh()
+        source.value = [descriptor(id: "left", x: 100), descriptor(id: "right", x: 1800)]
+        registry.refresh()
+
+        XCTAssertEqual(registry.invalidCalibrationIDs(for: [calibration(id: "left"), calibration(id: "right")]), [
+            DisplayID(rawValue: "left"), DisplayID(rawValue: "right"),
+        ])
+    }
+
+    @MainActor
+    func testAcknowledgingCalibrationResolutionClearsOnlyThatPendingInvalidation() {
+        // Break caught: saving one replacement calibration clears unrelated pending invalidations.
+        let source = MutableDisplaySource([
+            descriptor(id: "left", x: 0),
+            descriptor(id: "right", x: 1920),
+        ])
+        let registry = DisplayRegistry(descriptorProvider: source.descriptors)
+        let calibrations = [calibration(id: "left"), calibration(id: "right")]
+
+        source.value = [descriptor(id: "left", x: 0), descriptor(id: "right", x: 1800)]
+        registry.refresh()
+        source.value = [descriptor(id: "left", x: 100), descriptor(id: "right", x: 1800)]
+        registry.refresh()
+        registry.acknowledgeCalibrationResolution(for: [DisplayID(rawValue: "right")])
+
+        XCTAssertEqual(registry.invalidCalibrationIDs(for: calibrations), [DisplayID(rawValue: "left")])
     }
 
     private func descriptor(id: String, x: CGFloat, y: CGFloat = 0) -> DisplayDescriptor {

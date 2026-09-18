@@ -99,6 +99,20 @@ public struct DisplayTopology: Equatable, Sendable {
         })
     }
 
+    fileprivate func invalidatedDisplayIDs(comparedTo previous: DisplayTopology) -> Set<DisplayID> {
+        let currentByID = Dictionary(uniqueKeysWithValues: displays.map { ($0.id, $0) })
+
+        return Set(previous.displays.compactMap { old in
+            guard let current = currentByID[old.id] else {
+                return old.id
+            }
+            guard old.isPersistable, current.isPersistable, old.frame == current.frame else {
+                return old.id
+            }
+            return nil
+        })
+    }
+
     private static func support(for displays: [DisplayDescriptor]) -> DisplayTopologySupport {
         for (index, display) in displays.enumerated() {
             for other in displays.dropFirst(index + 1) {
@@ -130,7 +144,7 @@ public final class DisplayRegistry {
     private let descriptorProvider: @MainActor () -> [DisplayDescriptor]
     private let notificationCenter: NotificationCenter
     private var topology: DisplayTopology
-    private var previousTopology: DisplayTopology?
+    private var pendingInvalidatedDisplayIDs = Set<DisplayID>()
     private var continuation: AsyncStream<[DisplayDescriptor]>.Continuation
     private var observer: NSObjectProtocol?
 
@@ -169,7 +183,7 @@ public final class DisplayRegistry {
         let updatedTopology = DisplayTopology(displays: descriptorProvider())
         guard updatedTopology.signature != topology.signature else { return }
 
-        previousTopology = topology
+        pendingInvalidatedDisplayIDs.formUnion(updatedTopology.invalidatedDisplayIDs(comparedTo: topology))
         topology = updatedTopology
         displays = updatedTopology.displays
         topologySignature = updatedTopology.signature
@@ -178,11 +192,15 @@ public final class DisplayRegistry {
     }
 
     public func invalidCalibrationIDs(for calibrations: [DisplayCalibration]) -> Set<DisplayID> {
-        guard let previousTopology else {
-            let activePersistableIDs = Set(displays.lazy.filter(\.isPersistable).map(\.id))
-            return Set(calibrations.map(\.displayID)).subtracting(activePersistableIDs)
-        }
-        return topology.invalidCalibrationIDs(comparedTo: previousTopology, calibrations: calibrations)
+        let calibrationIDs = Set(calibrations.map(\.displayID))
+        let activePersistableIDs = Set(displays.lazy.filter(\.isPersistable).map(\.id))
+        return calibrationIDs.subtracting(activePersistableIDs)
+            .union(pendingInvalidatedDisplayIDs.intersection(calibrationIDs))
+    }
+
+    /// Call after the consumer removes or replaces the persisted calibrations for these displays.
+    public func acknowledgeCalibrationResolution(for displayIDs: Set<DisplayID>) {
+        pendingInvalidatedDisplayIDs.subtract(displayIDs)
     }
 
     isolated deinit {
