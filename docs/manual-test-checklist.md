@@ -12,7 +12,7 @@
 | CPU 架构 | arm64 |
 | AirPods 型号 / 固件 | NOT RECORDED |
 | 显示器型号 / 左右排列 | NOT RECORDED |
-| App commit / 版本 | `9d8da3f` / `0.1.0` |
+| App commit / 版本 | `8f8f68c` / `0.1.0` |
 | 执行人 | NOT RECORDED |
 
 状态只能填写：
@@ -30,7 +30,7 @@
 
 | 检查 | 证据 | 状态 |
 |---|---|---|
-| Swift 测试套件 | `swift test --disable-sandbox`：157 tests，0 failures；2026-09-18 | PASS |
+| Swift 测试套件 | `swift test --disable-sandbox`：159 tests，0 failures；2026-09-18 | PASS |
 | arm64 Release app bundle | `./Scripts/build-app.sh`：exit 0，产物为 `build/HeadPrivacy.app`；2026-09-18 | PASS |
 | Info.plist 语法 | `plutil -lint build/HeadPrivacy.app/Contents/Info.plist`：`OK` | PASS |
 | ad-hoc 签名完整性 | `codesign --verify --deep --strict --verbose=2 build/HeadPrivacy.app`：`valid on disk`、`satisfies its Designated Requirement` | PASS |
