@@ -59,9 +59,8 @@ struct MotionProviderStateMachine {
                 available = connected
                 refreshAvailability()
             case .receivedSample:
-                if state == .available { state = .streaming }
+                if authorization == .authorized, available { state = .streaming }
             case .failed:
-                available = false
                 state = .unavailable
             case .started, .stopped:
                 break

@@ -147,6 +147,7 @@ final class AppController {
     private var sleeping = false
     private var restartMotionAfterSleep = false
     private var permissionDenied = false
+    private var motionPermissionRetryPending = false
     private var outageNotified = false
     private var outageGeneration = 0
     private var referenceLost = false
@@ -411,6 +412,22 @@ final class AppController {
     func openSettings() { onSettingsRequested?() }
     func quit() { shutdown(); onQuitRequested?() }
 
+    /// Re-reads Core Motion authorization without replacing the event stream consumer.
+    /// A successful retry always leads back through guided calibration because the
+    /// provider's relative reference belongs to the discarded denied session.
+    func retryMotionPermission() {
+        guard started, !terminated, !sleeping, permissionDenied else { return }
+        motionPermissionRetryPending = true
+        referenceLost = true
+        calibrationRequired = true
+        resetDetection()
+        if motionRunning { motion.stop() }
+        motionRunning = true
+        sampleFloor = timing.now()
+        motion.start()
+        transition(.unavailable, status: .permissionRequired)
+    }
+
     /// The application lifecycle adapter forwards NSWorkspace sleep/wake notifications.
     func prepareForSleep() {
         guard started, !terminated, !sleeping else { return }
@@ -513,6 +530,7 @@ final class AppController {
         invalidateQueuedNotification()
         loginReconciliationTask?.cancel()
         loginReconciliationTask = nil
+        motionPermissionRetryPending = false
         hotkey.unregister()
         registeredHotkey = nil
         overlays.reconcile(displays: [])
@@ -650,13 +668,17 @@ final class AppController {
             let wasDenied = permissionDenied
             permissionDenied = authorization == .denied || authorization == .restricted
             if permissionDenied {
+                motionPermissionRetryPending = false
                 if calibrationActive { abortCalibration("Motion permission was lost. Restore access and restart calibration.") }
                 referenceLost = true
                 calibrationRequired = true
                 if !userPaused { unavailable(status: .permissionRequired) }
             } else if wasDenied {
-                motion.captureReference()
+                let completedExplicitRetry = motionPermissionRetryPending
+                motionPermissionRetryPending = false
+                if !completedExplicitRetry { motion.captureReference() }
                 if !userPaused { transition(.uncalibrated) }
+                if completedExplicitRetry { onRecalibrationRequested?() }
             }
         case .connectionChanged(false):
             if calibrationActive { abortCalibration("Headphones disconnected. Reconnect and restart calibration.") }

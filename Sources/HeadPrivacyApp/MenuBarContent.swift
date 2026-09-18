@@ -18,6 +18,7 @@ struct MenuBarContent: View {
         Button("Temporarily Reveal All", action: controller.temporarilyRevealAll)
             .disabled(!controller.canControlProtection)
         if controller.needsMotionPermission {
+            Button("Retry Motion Access", action: controller.retryMotionPermission)
             Button("Motion Access Help…", action: showSettings)
         }
         Button(controller.isCalibrationActive ? "Show Calibration…" : "Recalibrate Displays…",

@@ -594,6 +594,49 @@ final class AppControllerTests: XCTestCase {
         }
     }
 
+    func testExplicitMotionPermissionRetryReusesConsumerAndStartsFreshCalibrationSession() async {
+        // Break caught: requiring an app relaunch after Motion is enabled, starting a
+        // second stream consumer, or silently reusing the denied session's reference.
+        let inactive = Fixture()
+        inactive.controller.retryMotionPermission()
+        XCTAssertEqual(inactive.motion.starts, 0)
+        XCTAssertEqual(inactive.motion.stops, 0)
+
+        let f = Fixture()
+        f.motion.authorizationOnStart = .denied
+        await f.controller.start()
+        await drain()
+        XCTAssertEqual(f.controller.status, .permissionRequired)
+        XCTAssertEqual(f.motion.starts, 1)
+        XCTAssertEqual(f.motion.streamReads, 1)
+
+        var calibrationRequests = 0
+        f.controller.onRecalibrationRequested = { calibrationRequests += 1 }
+        f.motion.authorizationOnStart = .authorized
+        f.controller.retryMotionPermission()
+        await drain()
+
+        XCTAssertEqual(f.motion.stops, 1)
+        XCTAssertEqual(f.motion.starts, 2)
+        XCTAssertEqual(f.motion.references, 2)
+        XCTAssertEqual(f.motion.streamReads, 1)
+        XCTAssertTrue(f.controller.calibrationRequired)
+        XCTAssertEqual(f.controller.status, .calibrationRequired)
+        XCTAssertEqual(calibrationRequests, 1)
+
+        f.controller.retryMotionPermission()
+        XCTAssertEqual(f.motion.stops, 1)
+        XCTAssertEqual(f.motion.starts, 2)
+
+        await f.event(.authorizationChanged(.denied))
+        f.controller.shutdown()
+        let startsAfterShutdown = f.motion.starts
+        let stopsAfterShutdown = f.motion.stops
+        f.controller.retryMotionPermission()
+        XCTAssertEqual(f.motion.starts, startsAfterShutdown)
+        XCTAssertEqual(f.motion.stops, stopsAfterShutdown)
+    }
+
     func testRecoveredOutageCannotDispatchQueuedNotification() async {
         let f = Fixture()
         await f.controller.start()
@@ -989,9 +1032,16 @@ private final class MotionFake: MotionProviding {
     var starts = 0
     var stops = 0
     var references = 0
+    var authorizationOnStart: CMAuthorizationStatus?
     var events: AsyncStream<MotionEvent> { streamReads += 1; return stream }
     init() { (stream, continuation) = AsyncStream.makeStream() }
-    func start() { starts += 1 }
+    func start() {
+        starts += 1
+        if let authorizationOnStart {
+            continuation.yield(.authorizationChanged(authorizationOnStart))
+            if authorizationOnStart == .authorized { continuation.yield(.connectionChanged(true)) }
+        }
+    }
     func stop() { stops += 1 }
     func captureReference() { references += 1 }
 }

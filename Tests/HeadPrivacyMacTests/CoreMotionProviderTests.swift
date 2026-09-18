@@ -176,6 +176,32 @@ final class CoreMotionProviderTests: XCTestCase {
         ])
     }
 
+    func testTransientFailureRecoversOnlyAfterCapturingAFreshReference() async {
+        // Break caught: treating a transient callback failure as permanent, or reusing
+        // the pre-failure reference when successful callbacks resume.
+        let events = await events(count: 5) { provider, manager in
+            provider.start()
+            provider.captureReference()
+            manager.emit(yaw: 10)
+            manager.emit(yaw: 20)
+            manager.motionHandler?(.failure(.motionFailed("temporary")))
+            manager.emit(yaw: 30)
+            provider.captureReference()
+            manager.emit(yaw: 40)
+            manager.emit(yaw: 55)
+        }
+
+        XCTAssertEqual(Array(events.prefix(4)), [
+            .authorizationChanged(.authorized), .connectionChanged(true),
+            .sample(.init(yaw: .init(degrees: 10), timestamp: .seconds(42))),
+            .failed(.motionFailed("temporary")),
+        ])
+        guard case .sample(let recovered) = events.last else {
+            return XCTFail("Expected a sample relative to the fresh post-failure reference")
+        }
+        XCTAssertEqual(recovered.yaw.degrees, 15, accuracy: 0.00001)
+    }
+
     func testDeniedAuthorizationDoesNotStartHardware() async {
         // Break caught: starting updates when access has already been denied.
         let manager = FakeMotionManager()
