@@ -298,8 +298,13 @@ final class AppController {
         overlays.reconcile(displays: activeDisplays)
         lastApplication = nil
         transition(.paused)
-        guard calibrationTopologyIsUsable(latest), !permissionDenied else {
-            abortCalibration("Calibration needs Motion access and a supported horizontal display arrangement with stable display identities.")
+        guard !permissionDenied else {
+            abortCalibration("Motion access is unavailable. Allow HeadPrivacy in System Settings → Privacy & Security → Motion & Fitness, then retry.")
+            return
+        }
+        guard calibrationTopologyIsUsable(latest) else {
+            abortCalibration(topologySupportMessage(for: latest)
+                ?? "Unsupported display layout: duplicate display identities were detected. Reconnect the displays, then retry.")
             return
         }
     }

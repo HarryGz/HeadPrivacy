@@ -458,6 +458,18 @@ final class AppControllerTests: XCTestCase {
         f.controller.shutdown()
     }
 
+    func testDeniedMotionExplainsExactRecoveryPathBeforeCalibration() async {
+        let f = Fixture()
+        await f.controller.start()
+        f.controller.receive(.authorizationChanged(.denied))
+
+        f.controller.beginCalibration()
+
+        XCTAssertEqual(f.controller.calibrationError,
+            "Motion access is unavailable. Allow HeadPrivacy in System Settings → Privacy & Security → Motion & Fitness, then retry.")
+        f.controller.shutdown()
+    }
+
     func testExternalOnlyRuntimeTopologyInvalidatesClassificationAndRequestsRecovery() async {
         // Break caught: a MacBook with its built-in screen disabled continues using stale centers.
         let f = Fixture(policy: .protectionFirst)
@@ -1022,7 +1034,8 @@ final class AppControllerTests: XCTestCase {
         f.controller.beginCalibration()
         f.controller.startCalibrationSampling()
         XCTAssertEqual(f.motion.starts, 0)
-        XCTAssertNotNil(f.controller.calibrationError)
+        XCTAssertEqual(f.controller.calibrationError,
+            "Unsupported display layout: reconnect any display with an ambiguous identity, then recalibrate.")
         XCTAssertNil(f.controller.calibrationHighlight)
         f.controller.shutdown()
     }
