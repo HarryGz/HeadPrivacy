@@ -6,11 +6,11 @@ HeadPrivacy 是一款原生 macOS 菜单栏隐私辅助工具。它读取支持�
 
 ## 系统要求
 
-- Apple-silicon Mac（M 系列），macOS 14 或更高版本。
+- Apple-silicon MacBook（M 系列），macOS 14 或更高版本；使用时必须保持 MacBook 内置显示器启用。可以连接零台或多台外接显示器，但所有活动显示器必须水平排列。不支持 Mac mini、Mac Studio 或仅外接显示器的布局。
 - 能通过 Core Motion 提供 headphone motion 的 AirPods。验收目标为普通 AirPods 第 3 代或更新型号，以及 AirPods Pro；最终以运行时 `isDeviceMotionAvailable` 能力检查为准，不能据此推断所有 AirPods 代际都支持。
 - Xcode / Swift 构建工具。
 
-首版只支持水平排列的显示器，不支持上下堆叠布局。
+首版只支持包含 MacBook 内置显示器的水平排列，不支持上下堆叠、重叠或仅外接显示器的布局。
 
 ## 构建与启动
 
@@ -52,7 +52,7 @@ Settings 中可以调整触发区域宽度、切换/离开/返回停留时间、
 - 只请求 Motion 权限；不需要 Screen Recording、Accessibility、相机、麦克风、定位或网络权限。
 - 不截取、读取或存储屏幕像素，也不包含遥测或网络连接。
 - 原始 motion 样本只在内存中参与即时分类，随后丢弃，不写入磁盘。
-- 持久化校准只包含显示器身份、几何相关元数据、相对中心角和区域宽度；不保存 motion 历史。
+- 持久化校准只包含显示器 ID、显示器名称、相对中心 yaw 和区域半宽；不保存屏幕 frame、拓扑几何或 motion 历史。
 
 ## 已知限制与验收状态
 
