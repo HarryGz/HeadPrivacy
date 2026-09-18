@@ -192,6 +192,68 @@ final class AppControllerTests: XCTestCase {
         unsafe.controller.shutdown()
     }
 
+    func testRestartingIndividualRecalibrationRetainsTargetReferenceAndCompleteSet() async {
+        // Break caught: the shared Restart button silently changes a one-display edit
+        // into full calibration, captures a new reference, or drops peer calibration.
+        let f = Fixture()
+        f.calibrations.values[0].halfWidth = .init(degrees: 20)
+        f.calibrations.values[1].halfWidth = .init(degrees: 35)
+        f.calibrations.values[2].halfWidth = .init(degrees: 40)
+        await f.controller.start()
+        let original = f.calibrations.values
+        let references = f.motion.references
+        let centerID = DisplayID(rawValue: "center")
+
+        f.controller.requestDisplayRecalibration(centerID)
+        f.controller.startCalibrationSampling()
+        for i in 1...4 { await f.sample(9, at: .milliseconds(Int64(i) * 100)) }
+        f.controller.restartCalibration()
+
+        XCTAssertEqual(f.controller.calibrationFlow,
+            .ready(display: f.displays.displays[1], index: 1, total: 1))
+        XCTAssertEqual(f.motion.references, references)
+        XCTAssertEqual(f.controller.calibrationStability, 0)
+
+        f.controller.startCalibrationSampling()
+        for i in 5...15 { await f.sample(14, at: .milliseconds(Int64(i) * 100)) }
+        await f.sample(14, at: .milliseconds(1600))
+        await f.sample(14, at: .milliseconds(1700))
+        f.controller.acceptCalibration()
+
+        XCTAssertEqual(f.motion.references, references)
+        XCTAssertEqual(f.calibrations.saves, 1)
+        XCTAssertEqual(f.calibrations.values.count, 3)
+        XCTAssertEqual(f.calibrations.values.map(\.halfWidth), original.map(\.halfWidth))
+        XCTAssertEqual(f.calibrations.values[0].centerYaw, original[0].centerYaw)
+        XCTAssertEqual(f.calibrations.values[1].centerYaw.degrees, 14, accuracy: 0.001)
+        XCTAssertEqual(f.calibrations.values[2].centerYaw, original[2].centerYaw)
+        f.controller.shutdown()
+    }
+
+    func testCancellingAfterIndividualRestartRestoresOriginalValidSet() async {
+        // Break caught: restarting a one-display edit makes Cancel invalidate or replace
+        // the previously valid complete calibration.
+        let f = Fixture()
+        await f.controller.start()
+        let original = f.calibrations.values
+        let references = f.motion.references
+        let rightID = DisplayID(rawValue: "right")
+        f.controller.requestDisplayRecalibration(rightID)
+        f.controller.startCalibrationSampling()
+        for i in 1...4 { await f.sample(70, at: .milliseconds(Int64(i) * 100)) }
+        f.controller.restartCalibration()
+        XCTAssertEqual(f.controller.calibrationFlow,
+            .ready(display: f.displays.displays[2], index: 1, total: 1))
+        f.controller.cancelCalibration()
+
+        XCTAssertFalse(f.controller.calibrationRequired)
+        XCTAssertTrue(f.controller.canRecalibrateDisplay(rightID))
+        XCTAssertEqual(f.motion.references, references)
+        XCTAssertEqual(f.calibrations.values, original)
+        XCTAssertEqual(f.calibrations.saves, 0)
+        f.controller.shutdown()
+    }
+
     func testProtectionFirstFailureExplainsCoverageAndKeepsRevealEscapeEnabled() async {
         // Break caught: a fail-closed overlay hides content without an explanation or visible escape.
         let f = Fixture(policy: .protectionFirst)

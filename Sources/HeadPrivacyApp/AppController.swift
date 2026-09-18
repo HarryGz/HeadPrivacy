@@ -342,6 +342,19 @@ final class AppController {
 
     func restartCalibration() {
         guard started, !terminated, !sleeping else { return }
+        if let displayID = individualCalibrationID {
+            guard checkCalibrationSession(),
+                  let display = calibrationDisplays.first(where: { $0.id == displayID }) else { return }
+            pendingCalibrations = calibrations
+            calibrationError = nil
+            calibrationSession = CalibrationSession()
+            calibrationStability = 0
+            calibrationLastSample = nil
+            resetDetection()
+            sampleFloor = timing.now()
+            calibrationFlow = .ready(display: display, index: 1, total: 1)
+            return
+        }
         beginCalibration()
         startCalibrationSampling()
     }
