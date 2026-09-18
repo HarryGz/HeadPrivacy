@@ -900,7 +900,7 @@ final class AppControllerTests: XCTestCase {
         f.controller.shutdown()
     }
 
-    func testStoredPerDisplayWidthsAndConfiguredSmoothingAffectClassification() async {
+    func testStoredPerDisplayWidthsAndZeroSmoothingAttemptRemainResponsive() async {
         let f = Fixture()
         f.calibrations.values[1].halfWidth = .init(degrees: 5)
         f.calibrations.values[2].halfWidth = .init(degrees: 35)
@@ -909,13 +909,15 @@ final class AppControllerTests: XCTestCase {
         settings.zoneHalfWidth = .init(degrees: 90)
         settings.filterAlpha = 0
         await f.controller.updateSettings(settings)
-        await f.sample(12, at: .zero)
-        await f.sample(0, at: .milliseconds(120))
-        XCTAssertEqual(f.overlays.last, ["left", "center", "right"])
-        settings.filterAlpha = 1
-        await f.controller.updateSettings(settings)
-        await f.sample(90, at: .milliseconds(150))
-        await f.sample(90, at: .milliseconds(250))
+        XCTAssertEqual(f.controller.settings.filterAlpha, 0.05)
+        await f.sample(0, at: .zero)
+        await f.sample(0, at: .milliseconds(100))
+        XCTAssertEqual(f.overlays.last, ["left", "right"])
+
+        for milliseconds in stride(from: 200, through: 900, by: 100) {
+            await f.sample(90, at: .milliseconds(Int64(milliseconds)))
+        }
+
         XCTAssertEqual(f.overlays.last, ["left", "center"])
         f.controller.shutdown()
     }

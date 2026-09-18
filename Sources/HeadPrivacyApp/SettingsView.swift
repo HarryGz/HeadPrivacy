@@ -83,8 +83,9 @@ struct SettingsView: View {
                 get: { controller.settings.zoneHalfWidth.degrees },
                 set: { degrees in edit { $0.zoneHalfWidth = .init(degrees: degrees) } }), range: 5...90, step: 1)
             Text("Used for newly calibrated displays. Existing zones are edited in Displays.").font(.caption)
-            numeric("Smoothing alpha", value: binding(\.filterAlpha), range: 0...1)
-            Text("Higher alpha responds faster; lower alpha smooths more.").font(.caption)
+            numeric("Smoothing response", value: binding(\.filterAlpha),
+                    range: AppSettings.filterAlphaRange, step: 0.05)
+            Text("0.05 gives maximum smoothing; 1 responds immediately.").font(.caption)
             numeric("Switch dwell (ms)", value: durationBinding(\.switchDwell), range: 0...1000, step: 10)
             numeric("Away dwell (ms)", value: durationBinding(\.awayDwell), range: 0...1000, step: 10)
             numeric("Return dwell (ms)", value: durationBinding(\.returnDwell), range: 0...1000, step: 10)

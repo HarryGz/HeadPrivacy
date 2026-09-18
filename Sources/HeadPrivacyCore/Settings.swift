@@ -88,8 +88,10 @@ public struct AppSettings: Codable, Equatable, Sendable {
     }
 
     public static let defaults = AppSettings()
+    /// Positive smoothing bounds keep fresh samples capable of moving the filtered yaw.
+    public static let filterAlphaRange: ClosedRange<Double> = 0.05...1
 
-    /// Clamps finite values to inclusive UI/persistence bounds: opacity and filter alpha 0...1,
+    /// Clamps finite values to inclusive UI/persistence bounds: opacity 0...1, filter alpha 0.05...1,
     /// tint brightness -1...1, each side's width fraction 0.1...0.45, zone half-width 5...90°,
     /// and each dwell 0...1 second. Side widths preserve a visible center; zone/dwell bounds
     /// keep the horizontal classifier usable. Nonfinite floating-point values use that
@@ -100,7 +102,9 @@ public struct AppSettings: Codable, Equatable, Sendable {
         settings.overlayOpacity = overlayOpacity.isFinite ? min(max(overlayOpacity, 0), 1) : Self.defaults.overlayOpacity
         settings.tintBrightness = tintBrightness.isFinite ? min(max(tintBrightness, -1), 1) : Self.defaults.tintBrightness
         settings.sideWidthFraction = sideWidthFraction.isFinite ? min(max(sideWidthFraction, 0.1), 0.45) : Self.defaults.sideWidthFraction
-        settings.filterAlpha = filterAlpha.isFinite ? min(max(filterAlpha, 0), 1) : Self.defaults.filterAlpha
+        settings.filterAlpha = filterAlpha.isFinite
+            ? min(max(filterAlpha, Self.filterAlphaRange.lowerBound), Self.filterAlphaRange.upperBound)
+            : Self.defaults.filterAlpha
         settings.zoneHalfWidth = zoneHalfWidth.radians.isFinite
             ? Angle(degrees: min(max(zoneHalfWidth.degrees, 5), 90)) : Self.defaults.zoneHalfWidth
         settings.switchDwell = min(max(switchDwell, .zero), .seconds(1))

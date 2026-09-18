@@ -83,7 +83,7 @@ final class PreferencesStoreTests: XCTestCase {
                 XCTAssertEqual(value.overlayOpacity, 1)
                 XCTAssertEqual(value.tintBrightness, -1)
                 XCTAssertEqual(value.sideWidthFraction, 0.1)
-                XCTAssertEqual(value.filterAlpha, 0)
+                XCTAssertEqual(value.filterAlpha, 0.05)
                 XCTAssertEqual(value.zoneHalfWidth.degrees, 90, accuracy: 1e-10)
                 XCTAssertEqual(value.switchDwell, .zero)
                 XCTAssertEqual(value.awayDwell, .seconds(1))
@@ -110,7 +110,7 @@ final class PreferencesStoreTests: XCTestCase {
     func testInclusiveBoundsSurviveDirectRoundTrip() throws {
         for settings in [
             AppSettings(overlayOpacity: 0, tintBrightness: -1, sideWidthFraction: 0.1,
-                filterAlpha: 0, zoneHalfWidth: .init(degrees: 5), switchDwell: .zero,
+                filterAlpha: 0.05, zoneHalfWidth: .init(degrees: 5), switchDwell: .zero,
                 awayDwell: .zero, returnDwell: .zero),
             AppSettings(overlayOpacity: 1, tintBrightness: 1, sideWidthFraction: 0.45,
                 filterAlpha: 1, zoneHalfWidth: .init(degrees: 90), switchDwell: .seconds(1),
@@ -119,6 +119,18 @@ final class PreferencesStoreTests: XCTestCase {
             XCTAssertEqual(settings.validated(), settings)
             XCTAssertEqual(try JSONDecoder().decode(AppSettings.self,
                 from: JSONEncoder().encode(settings)), settings)
+        }
+    }
+
+    // Break caught: legacy persisted zero bypasses migration and freezes live detection.
+    func testPersistedZeroFilterAlphaMigratesToResponsiveMinimum() throws {
+        try withDefaults { defaults in
+            defaults.set(try JSONEncoder().encode(AppSettings(filterAlpha: 0)),
+                         forKey: "appSettings.v1")
+
+            let store = PreferencesStore(defaults: defaults)
+
+            XCTAssertEqual(store.settings.filterAlpha, 0.05)
         }
     }
 
