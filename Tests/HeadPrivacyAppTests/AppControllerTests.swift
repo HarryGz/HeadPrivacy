@@ -32,6 +32,24 @@ final class AppControllerTests: XCTestCase {
         f.controller.shutdown()
     }
 
+    func testReadyStepDoesNotExpireWhileTurningToNextDisplay() async {
+        let f = Fixture()
+        await f.controller.start()
+        f.controller.beginCalibration()
+        f.controller.startCalibrationSampling()
+
+        for i in 1...11 { await f.sample(-60, at: .milliseconds(Int64(i) * 100)) }
+        let middleReady = CalibrationFlowState.ready(
+            display: f.displays.displays[1], index: 2, total: 3)
+        XCTAssertEqual(f.controller.calibrationFlow, middleReady)
+
+        await f.advance(to: .seconds(2))
+
+        XCTAssertEqual(f.controller.calibrationFlow, middleReady)
+        XCTAssertNil(f.controller.calibrationError)
+        f.controller.shutdown()
+    }
+
     func testSamplingConfirmationOutsideAReadyCalibrationDoesNothing() async {
         // Break caught: a stale UI action aborts an otherwise idle controller.
         let f = Fixture()

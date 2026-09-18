@@ -524,7 +524,12 @@ final class AppController {
             else { calibrationFlow = .validating(currentDisplay: nil) }
         default: break
         }
-        scheduleStaleDeadline(from: sample.timestamp)
+        switch calibrationFlow {
+        case .sampling, .validating:
+            scheduleStaleDeadline(from: sample.timestamp)
+        default:
+            break
+        }
     }
 
     func openSettings() { onSettingsRequested?() }
