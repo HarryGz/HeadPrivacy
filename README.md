@@ -66,3 +66,7 @@ Settings 中可以调整触发区域宽度、切换/离开/返回停留时间、
 - 自动化测试和 bundle 静态检查不等于真实硬件验收。普通 AirPods、AirPods Pro、多显示器、Spaces、权限 UI 与实测延迟仍须由用户在真实设备上执行并记录。
 
 完整步骤和待完成项目见[手动验收清单](docs/manual-test-checklist.md)。
+
+## License
+
+HeadPrivacy 以 [MIT License](LICENSE) 开源。
