@@ -91,6 +91,7 @@ final class AppController {
     private var restartMotionAfterSleep = false
     private var permissionDenied = false
     private var outageNotified = false
+    private var outageGeneration = 0
     private var referenceLost = false
     private var pendingInvalidation = Set<DisplayID>()
     private var sampleFloor: Duration = .zero
@@ -140,6 +141,7 @@ final class AppController {
     func pause() {
         guard started, !terminated else { return }
         userPaused = true
+        invalidateQueuedNotification()
         resetDetection()
         transition(.paused)
         // Keep the one-shot stream and relative reference alive. Classification is stopped.
@@ -205,13 +207,16 @@ final class AppController {
     func updateSettings(_ value: AppSettings) async {
         guard !terminated else { return }
         let old = settings
+        let hadActiveOutage = status == .headphonesUnavailable || status == .permissionRequired
         preferences.settings = value.validated()
         settings = preferences.settings.validated()
         notifications.isEnabled = settings.notificationsEnabled
         if old.filterAlpha != settings.filterAlpha || old.switchDwell != settings.switchDwell
             || old.awayDwell != settings.awayDwell || old.returnDwell != settings.returnDwell {
             configureDetection()
-            if !userPaused, !calibrationRequired { transition(.unavailable, status: .connecting) }
+            if !userPaused, !calibrationRequired, !hadActiveOutage {
+                transition(.unavailable, status: .connecting)
+            }
         }
         applyDecision(viewingState)
         if viewingState == .unavailable, status == .headphonesUnavailable || status == .permissionRequired {
@@ -229,7 +234,7 @@ final class AppController {
         motion.stop(); motionRunning = false
         motionTask?.cancel(); motionTask = nil
         displayTask?.cancel(); displayTask = nil
-        notificationTask?.cancel(); notificationTask = nil
+        invalidateQueuedNotification()
         hotkey.unregister()
         overlays.reconcile(displays: [])
     }
@@ -302,7 +307,8 @@ final class AppController {
             && $0.halfWidth.radians > 0 }
     }
 
-    private func receive(_ event: MotionEvent) {
+    // Internal event-processing boundary; the lifetime task above owns stream consumption.
+    func receive(_ event: MotionEvent) {
         guard started, !terminated, !sleeping else { return }
         switch event {
         case .authorizationChanged(let authorization):
@@ -338,7 +344,11 @@ final class AppController {
                   sample.timestamp <= timing.now(), timing.now() - sample.timestamp < .milliseconds(500),
                   latestSample.map({ sample.timestamp >= $0 }) ?? true else { return }
             onMotionSample?(sample)
-            if outageNotified { notifications.motionBecameAvailable(); outageNotified = false }
+            if outageNotified {
+                invalidateQueuedNotification()
+                notifications.motionBecameAvailable()
+                outageNotified = false
+            }
             guard !userPaused, !calibrationRequired else { return }
             latestSample = sample.timestamp
             let filtered = MotionSample(yaw: filter.update(sample.yaw), timestamp: sample.timestamp)
@@ -378,19 +388,31 @@ final class AppController {
         guard !outageNotified, settings.notificationsEnabled, settings.failurePolicy == .usabilityFirst else { return }
         outageNotified = true
         let policy = settings.failurePolicy
-        notificationTask?.cancel()
+        invalidateQueuedNotification()
+        let generation = outageGeneration
         notificationTask = Task { @MainActor [weak self] in
-            guard let self else { return }
+            guard !Task.isCancelled, let self, !self.terminated, !self.userPaused,
+                  self.outageGeneration == generation, self.outageNotified,
+                  self.settings.notificationsEnabled, self.settings.failurePolicy == policy else { return }
             do { try await self.notifications.motionBecameUnavailable(failurePolicy: policy) }
             catch {
-                if !Task.isCancelled, !self.terminated {
+                if !Task.isCancelled, !self.terminated, self.outageGeneration == generation {
                     self.serviceError = "Could not deliver motion notification: \(error)"
                 }
             }
         }
     }
 
+    private func invalidateQueuedNotification() {
+        outageGeneration += 1
+        notificationTask?.cancel()
+        notificationTask = nil
+        // Preserve the reserved attempt until usable motion recovers. Cancellation alone
+        // must not create another notification opportunity for the same unresolved outage.
+    }
+
     private func transition(_ state: ViewingState, status explicit: AppStatus? = nil) {
+        let state: ViewingState = permissionDenied && state != .paused ? .unavailable : state
         viewingState = state
         currentDisplayName = nil
         switch state {
@@ -402,6 +424,7 @@ final class AppController {
             currentDisplayName = activeDisplays.first { $0.id == id }?.name
             status = .viewing(displayName: currentDisplayName ?? id.rawValue)
         }
+        if permissionDenied, state != .paused { status = .permissionRequired }
         applyDecision(state)
     }
 

@@ -6,6 +6,92 @@ import HeadPrivacyMac
 
 @MainActor
 final class AppControllerTests: XCTestCase {
+    func testDetectionChangeDuringStaleOutagePreservesFailureAndNotifiesOnce() async {
+        let f = Fixture(policy: .protectionFirst)
+        await f.controller.start()
+        await f.advance(to: .milliseconds(500))
+        var settings = f.preferences.settings
+        settings.filterAlpha = 0.5
+        settings.switchDwell = .milliseconds(200)
+        settings.failurePolicy = .usabilityFirst
+        await f.controller.updateSettings(settings)
+        await drain()
+        XCTAssertEqual(f.controller.status, .headphonesUnavailable)
+        XCTAssertEqual(f.overlays.last, [])
+        XCTAssertEqual(f.notifications.outages, 1)
+        settings.filterAlpha = 0.75
+        await f.controller.updateSettings(settings)
+        await drain()
+        XCTAssertEqual(f.controller.status, .headphonesUnavailable)
+        XCTAssertEqual(f.notifications.outages, 1)
+        f.controller.shutdown()
+    }
+
+    func testPermissionDenialWinsOverCalibrationAfterResumeTopologyAndConnectionEvents() async {
+        for authorization in [CMAuthorizationStatus.denied, .restricted] {
+            let f = Fixture()
+            await f.controller.start()
+            await f.event(.authorizationChanged(authorization))
+            XCTAssertEqual(f.controller.status, .permissionRequired)
+            f.controller.pause()
+            XCTAssertEqual(f.controller.status, .paused)
+            f.controller.resume()
+            XCTAssertEqual(f.controller.status, .permissionRequired)
+            f.displays.change(to: Array(f.displays.displays.dropLast()))
+            await drain()
+            XCTAssertEqual(f.controller.status, .permissionRequired)
+            await f.event(.connectionChanged(false))
+            XCTAssertEqual(f.controller.status, .permissionRequired)
+            await f.event(.connectionChanged(true))
+            XCTAssertEqual(f.controller.status, .permissionRequired)
+            XCTAssertTrue(f.controller.calibrationRequired)
+            await f.event(.authorizationChanged(.authorized))
+            XCTAssertEqual(f.controller.status, .calibrationRequired)
+            f.controller.shutdown()
+        }
+    }
+
+    func testRecoveredOutageCannotDispatchQueuedNotification() async {
+        let f = Fixture()
+        await f.controller.start()
+        // Process both events in this main-actor turn: the delivery task cannot run in between.
+        f.controller.receive(.failed(.motionFailed("lost")))
+        f.controller.receive(.sample(.init(yaw: .init(degrees: 0), timestamp: .zero)))
+        await drain()
+        XCTAssertEqual(f.notifications.outages, 0)
+        f.controller.receive(.failed(.motionFailed("new outage")))
+        await drain()
+        XCTAssertEqual(f.notifications.outages, 1)
+        f.controller.shutdown()
+    }
+
+    func testShutdownCannotDispatchQueuedNotification() async {
+        let f = Fixture()
+        await f.controller.start()
+        f.controller.receive(.failed(.motionFailed("lost")))
+        f.controller.shutdown()
+        await drain()
+        XCTAssertEqual(f.notifications.outages, 0)
+    }
+
+    func testPauseCancelsQueuedNotificationWithoutRetryingSameOutage() async {
+        let f = Fixture()
+        await f.controller.start()
+        f.controller.receive(.failed(.motionFailed("lost")))
+        f.controller.pause()
+        await drain()
+        XCTAssertEqual(f.notifications.outages, 0)
+        f.controller.resume()
+        f.controller.receive(.failed(.motionFailed("still lost")))
+        await drain()
+        XCTAssertEqual(f.notifications.outages, 0)
+        f.controller.receive(.sample(.init(yaw: .init(degrees: 0), timestamp: .zero)))
+        f.controller.receive(.failed(.motionFailed("new outage")))
+        await drain()
+        XCTAssertEqual(f.notifications.outages, 1)
+        f.controller.shutdown()
+    }
+
     func testCenterAndAwayDecisionsAndOverlayDeduplication() async {
         let f = Fixture()
         await f.controller.start()
