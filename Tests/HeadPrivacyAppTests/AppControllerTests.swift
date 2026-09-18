@@ -1596,6 +1596,22 @@ private final class MotionFake: MotionProviding {
 
 @MainActor
 final class AppDependencyFactoryTests: XCTestCase {
+    func testSwiftUIAppInitializerDoesNotForceNSApplicationCreation() throws {
+        // SwiftUI owns NSApplication creation. Touching NSApplication.shared from
+        // HeadPrivacyApp.init can stall before applicationDidFinishLaunching.
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(contentsOf: repositoryRoot
+            .appendingPathComponent("Sources/HeadPrivacyApp/HeadPrivacyApp.swift"), encoding: .utf8)
+        let appDeclaration = try XCTUnwrap(source.range(of: "struct HeadPrivacyApp: App"))
+        let bodyDeclaration = try XCTUnwrap(source.range(of: "    var body: some Scene", range: appDeclaration.lowerBound..<source.endIndex))
+        let initializer = source[appDeclaration.lowerBound..<bodyDeclaration.lowerBound]
+
+        XCTAssertFalse(initializer.contains("NSApplication.shared"))
+    }
+
     func testProductionGraphSharesDependenciesWithoutStartingServicesOrWritingPreferences() throws {
         let suite = "HeadPrivacy.factory-tests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))

@@ -16,7 +16,6 @@ struct HeadPrivacyApp: App {
     private let graph: AppDependencies?
 
     init() {
-        NSApplication.shared.setActivationPolicy(.accessory)
         let mode = AppLaunchMode(arguments: CommandLine.arguments)
         graph = mode == .application ? AppDependencyFactory.make() : nil
         delegate.graph = graph
