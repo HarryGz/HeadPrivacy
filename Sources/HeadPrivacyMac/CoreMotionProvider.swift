@@ -92,7 +92,7 @@ protocol HeadphoneMotionManaging: AnyObject {
 /// Core Motion's delegate and the serial motion queue. No samples are written to disk.
 public final class CoreMotionProvider: MotionProviding, @unchecked Sendable {
     public let events: AsyncStream<MotionEvent>
-    private let continuation: AsyncStream<MotionEvent>.Continuation
+    private let mailbox: MotionEventMailbox
     private let manager: any HeadphoneMotionManaging
     private let clock: any MonotonicClock
     private let lock = NSRecursiveLock()
@@ -111,7 +111,9 @@ public final class CoreMotionProvider: MotionProviding, @unchecked Sendable {
     init(manager: any HeadphoneMotionManaging, clock: any MonotonicClock) {
         self.manager = manager
         self.clock = clock
-        (events, continuation) = AsyncStream.makeStream()
+        let mailbox = MotionEventMailbox()
+        self.mailbox = mailbox
+        events = AsyncStream(unfolding: { await mailbox.next() }, onCancel: { mailbox.cancel() })
         motionQueue = OperationQueue()
         motionQueue.name = "HeadPrivacy.headphone-motion"
         motionQueue.maxConcurrentOperationCount = 1
@@ -127,9 +129,9 @@ public final class CoreMotionProvider: MotionProviding, @unchecked Sendable {
             let available = manager.isDeviceMotionAvailable
             machine.handle(.started(authorization: authorization, available: available))
             lastAuthorization = authorization
-            continuation.yield(.authorizationChanged(authorization))
+            mailbox.send(.authorizationChanged(authorization))
             guard authorization == .authorized || authorization == .notDetermined else { return }
-            continuation.yield(.connectionChanged(available))
+            mailbox.send(.connectionChanged(available))
             manager.startConnectionUpdates { [weak self] connected in
                 self?.connectionChanged(connected, session: session)
             }
@@ -144,6 +146,7 @@ public final class CoreMotionProvider: MotionProviding, @unchecked Sendable {
             guard active else { return }
             active = false
             generation += 1
+            mailbox.discardSamples()
             reference = nil
             capturePending = false
             machine.handle(.stopped)
@@ -166,7 +169,7 @@ public final class CoreMotionProvider: MotionProviding, @unchecked Sendable {
             refreshAuthorization()
             machine.handle(.connectionChanged(connected))
             if !connected { reference = nil; capturePending = false }
-            continuation.yield(.connectionChanged(connected))
+            mailbox.send(.connectionChanged(connected))
         }
     }
 
@@ -179,7 +182,7 @@ public final class CoreMotionProvider: MotionProviding, @unchecked Sendable {
                 machine.handle(.failed)
                 reference = nil
                 capturePending = false
-                continuation.yield(.failed(error))
+                mailbox.send(.failed(error))
             case .success(let attitude):
                 machine.handle(.receivedSample)
                 guard machine.state == .streaming else { return }
@@ -190,7 +193,7 @@ public final class CoreMotionProvider: MotionProviding, @unchecked Sendable {
                 }
                 guard let reference, let relative = attitude.copy() as? CMAttitude else { return }
                 relative.multiply(byInverseOf: reference)
-                continuation.yield(.sample(MotionSample(yaw: Angle(radians: relative.yaw), timestamp: clock.now())))
+                mailbox.send(.sample(MotionSample(yaw: Angle(radians: relative.yaw), timestamp: clock.now())))
             }
         }
     }
@@ -201,50 +204,167 @@ public final class CoreMotionProvider: MotionProviding, @unchecked Sendable {
         lastAuthorization = status
         machine.handle(.authorizationChanged(status))
         if status != .authorized { reference = nil }
-        continuation.yield(.authorizationChanged(status))
+        mailbox.send(.authorizationChanged(status))
     }
 
     deinit {
         stop()
-        continuation.finish()
+        mailbox.finish()
     }
 }
 
-private final class SystemHeadphoneMotionManager: NSObject, HeadphoneMotionManaging, CMHeadphoneMotionManagerDelegate {
-    private let manager = CMHeadphoneMotionManager()
-    private let handlerLock = NSLock()
-    private var connectionHandler: ((Bool) -> Void)?
+/// AsyncStream's unfolding initializer pulls directly from this mailbox, so it
+/// cannot build a second, unbounded sample queue. There is one event consumer.
+private final class MotionEventMailbox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var pending: [MotionEvent] = []
+    private var waiter: CheckedContinuation<MotionEvent?, Never>?
+    private var finished = false
 
-    var authorizationStatus: CMAuthorizationStatus { CMHeadphoneMotionManager.authorizationStatus() }
-    var isDeviceMotionAvailable: Bool { manager.isDeviceMotionAvailable }
-
-    func startConnectionUpdates(handler: @escaping (Bool) -> Void) {
-        handlerLock.withLock { connectionHandler = handler }
-        manager.delegate = self
-        manager.startConnectionStatusUpdates()
+    func send(_ event: MotionEvent) {
+        lock.withLock {
+            guard !finished else { return }
+            if let waiter {
+                self.waiter = nil
+                waiter.resume(returning: event)
+            } else if case .sample = event, case .sample = pending.last {
+                pending[pending.count - 1] = event
+            } else {
+                pending.append(event)
+            }
+        }
     }
 
+    func next() async -> MotionEvent? {
+        await withCheckedContinuation { continuation in
+            lock.withLock {
+                if !pending.isEmpty {
+                    continuation.resume(returning: pending.removeFirst())
+                } else if finished {
+                    continuation.resume(returning: nil)
+                } else {
+                    waiter = continuation
+                }
+            }
+        }
+    }
+
+    func discardSamples() {
+        lock.withLock { pending.removeAll { if case .sample = $0 { true } else { false } } }
+    }
+
+    func finish() {
+        lock.withLock {
+            finished = true
+            waiter?.resume(returning: nil)
+            waiter = nil
+        }
+    }
+
+    func cancel() {
+        lock.withLock {
+            pending.removeAll()
+            finished = true
+            waiter?.resume(returning: nil)
+            waiter = nil
+        }
+    }
+}
+
+protocol HeadphoneConnectionReceiving: AnyObject {
+    func connectionChanged(_ connected: Bool)
+}
+
+protocol HeadphoneMotionHardware: AnyObject {
+    var authorizationStatus: CMAuthorizationStatus { get }
+    var isDeviceMotionAvailable: Bool { get }
+    var delegate: (any HeadphoneConnectionReceiving)? { get set }
+    func startConnectionUpdates()
+    func stopConnectionUpdates()
+    func startMotionUpdates(to queue: OperationQueue, handler: @escaping (Result<CMAttitude, MotionProviderError>) -> Void)
+    func stopMotionUpdates()
+}
+
+final class SystemHeadphoneMotionManager: HeadphoneMotionManaging {
+    private let hardwareFactory: () -> any HeadphoneMotionHardware
+    private var hardware: (any HeadphoneMotionHardware)?
+
+    init(hardwareFactory: @escaping () -> any HeadphoneMotionHardware = { CoreMotionHardware() }) {
+        self.hardwareFactory = hardwareFactory
+    }
+
+    private var currentHardware: any HeadphoneMotionHardware {
+        if let hardware { return hardware }
+        let hardware = hardwareFactory()
+        self.hardware = hardware
+        return hardware
+    }
+
+    var authorizationStatus: CMAuthorizationStatus { currentHardware.authorizationStatus }
+    var isDeviceMotionAvailable: Bool { currentHardware.isDeviceMotionAvailable }
+
+    func startConnectionUpdates(handler: @escaping (Bool) -> Void) {
+        // Each delegate permanently captures this start's closure. A queued
+        // notification can never look up a later session's connection handler.
+        currentHardware.delegate = HeadphoneConnectionSession(handler: handler)
+        currentHardware.startConnectionUpdates()
+    }
+
+    func startMotionUpdates(to queue: OperationQueue, handler: @escaping (Result<CMAttitude, MotionProviderError>) -> Void) {
+        currentHardware.startMotionUpdates(to: queue, handler: handler)
+    }
+
+    func stopMotionUpdates() { hardware?.stopMotionUpdates() }
+    func stopConnectionUpdates() {
+        hardware?.stopConnectionUpdates()
+        hardware?.delegate = nil
+        // A new native manager also isolates notifications that resolve their
+        // delegate only when delivered, instead of retaining the old delegate.
+        hardware = nil
+    }
+}
+
+private final class HeadphoneConnectionSession: HeadphoneConnectionReceiving {
+    private let handler: (Bool) -> Void
+    init(handler: @escaping (Bool) -> Void) { self.handler = handler }
+    func connectionChanged(_ connected: Bool) {
+        handler(connected)
+    }
+}
+
+private final class CoreMotionHardware: HeadphoneMotionHardware {
+    private let manager = CMHeadphoneMotionManager()
+    private var bridge: CoreMotionConnectionBridge?
+    var authorizationStatus: CMAuthorizationStatus { CMHeadphoneMotionManager.authorizationStatus() }
+    var isDeviceMotionAvailable: Bool { manager.isDeviceMotionAvailable }
+    var delegate: (any HeadphoneConnectionReceiving)? {
+        get { bridge?.receiver }
+        set {
+            bridge = newValue.map { CoreMotionConnectionBridge(receiver: $0) }
+            manager.delegate = bridge
+        }
+    }
+
+    func startConnectionUpdates() { manager.startConnectionStatusUpdates() }
+    func stopConnectionUpdates() { manager.stopConnectionStatusUpdates() }
+    func stopMotionUpdates() { manager.stopDeviceMotionUpdates() }
     func startMotionUpdates(to queue: OperationQueue, handler: @escaping (Result<CMAttitude, MotionProviderError>) -> Void) {
         manager.startDeviceMotionUpdates(to: queue) { motion, error in
             if let error { handler(.failure(.motionFailed(error.localizedDescription))) }
             else if let motion { handler(.success(motion.attitude)) }
         }
     }
+}
 
-    func stopMotionUpdates() { manager.stopDeviceMotionUpdates() }
-    func stopConnectionUpdates() {
-        manager.stopConnectionStatusUpdates()
-        manager.delegate = nil
-        handlerLock.withLock { connectionHandler = nil }
-    }
+private final class CoreMotionConnectionBridge: NSObject, CMHeadphoneMotionManagerDelegate {
+    let receiver: any HeadphoneConnectionReceiving
+    init(receiver: any HeadphoneConnectionReceiving) { self.receiver = receiver }
 
     func headphoneMotionManagerDidConnect(_ manager: CMHeadphoneMotionManager) {
-        let handler = handlerLock.withLock { connectionHandler }
-        handler?(true)
+        receiver.connectionChanged(true)
     }
 
     func headphoneMotionManagerDidDisconnect(_ manager: CMHeadphoneMotionManager) {
-        let handler = handlerLock.withLock { connectionHandler }
-        handler?(false)
+        receiver.connectionChanged(false)
     }
 }
