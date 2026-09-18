@@ -89,13 +89,20 @@ public struct AppSettings: Codable, Equatable, Sendable {
 
     public static let defaults = AppSettings()
 
+    /// Clamps finite values to inclusive UI/persistence bounds: opacity and filter alpha 0...1,
+    /// tint brightness -1...1, each side's width fraction 0.1...0.45, zone half-width 5...90°,
+    /// and each dwell 0...1 second. Side widths preserve a visible center; zone/dwell bounds
+    /// keep the horizontal classifier usable. Nonfinite floating-point values use that
+    /// field's default (including a nonfinite angle), so the result remains JSON-encodable.
+    /// Schema versions are not migrated here; persistence must reject unsupported versions.
     public func validated() -> AppSettings {
         var settings = self
-        settings.overlayOpacity = min(max(overlayOpacity, 0), 1)
-        settings.tintBrightness = min(max(tintBrightness, -1), 1)
-        settings.sideWidthFraction = min(max(sideWidthFraction, 0.1), 0.45)
-        settings.filterAlpha = min(max(filterAlpha, 0), 1)
-        settings.zoneHalfWidth = Angle(degrees: min(max(zoneHalfWidth.degrees, 5), 90))
+        settings.overlayOpacity = overlayOpacity.isFinite ? min(max(overlayOpacity, 0), 1) : Self.defaults.overlayOpacity
+        settings.tintBrightness = tintBrightness.isFinite ? min(max(tintBrightness, -1), 1) : Self.defaults.tintBrightness
+        settings.sideWidthFraction = sideWidthFraction.isFinite ? min(max(sideWidthFraction, 0.1), 0.45) : Self.defaults.sideWidthFraction
+        settings.filterAlpha = filterAlpha.isFinite ? min(max(filterAlpha, 0), 1) : Self.defaults.filterAlpha
+        settings.zoneHalfWidth = zoneHalfWidth.radians.isFinite
+            ? Angle(degrees: min(max(zoneHalfWidth.degrees, 5), 90)) : Self.defaults.zoneHalfWidth
         settings.switchDwell = min(max(switchDwell, .zero), .seconds(1))
         settings.awayDwell = min(max(awayDwell, .zero), .seconds(1))
         settings.returnDwell = min(max(returnDwell, .zero), .seconds(1))
