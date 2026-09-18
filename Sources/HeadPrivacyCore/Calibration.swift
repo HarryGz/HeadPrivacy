@@ -11,4 +11,11 @@ public struct DisplayCalibration: Codable, Equatable, Sendable {
     public var displayName: String
     public var centerYaw: Angle
     public var halfWidth: Angle
+
+    public init(displayID: DisplayID, displayName: String, centerYaw: Angle, halfWidth: Angle) {
+        self.displayID = displayID
+        self.displayName = displayName
+        self.centerYaw = centerYaw
+        self.halfWidth = halfWidth
+    }
 }

@@ -15,4 +15,21 @@ final class AngleTests: XCTestCase {
     func testAbsoluteDistanceIsCircular() {
         XCTAssertEqual(Angle(degrees: 170).distance(to: Angle(degrees: -170)).degrees, 20, accuracy: 1e-9)
     }
+
+    func testDecodingNormalizesRadians() throws {
+        let decoded = try JSONDecoder().decode(
+            Angle.self,
+            from: Data(#"{"radians":3.3415926535897933}"#.utf8)
+        )
+
+        XCTAssertEqual(decoded.radians, -.pi + 0.2, accuracy: 1e-12)
+    }
+
+    func testAbsoluteDistanceAtAntipodeIsPositivePi() {
+        XCTAssertEqual(
+            Angle(radians: 0).distance(to: Angle(radians: .pi)).degrees,
+            180,
+            accuracy: 1e-12
+        )
+    }
 }
