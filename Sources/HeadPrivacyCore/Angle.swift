@@ -48,9 +48,33 @@ public struct Angle: Sendable, Codable, Hashable {
 public struct AngularDistance: Sendable, Codable, Hashable {
     public let radians: Double
 
+    private enum CodingKeys: String, CodingKey {
+        case radians
+    }
+
     public init(radians: Double) {
         precondition((0...Double.pi).contains(radians), "Angular distance must be in [0, π].")
         self.radians = radians
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let radians = try container.decode(Double.self, forKey: .radians)
+
+        guard (0...Double.pi).contains(radians) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .radians,
+                in: container,
+                debugDescription: "Angular distance must be in [0, π]."
+            )
+        }
+
+        self.init(radians: radians)
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(radians, forKey: .radians)
     }
 
     public var degrees: Double {

@@ -32,4 +32,29 @@ final class AngleTests: XCTestCase {
             accuracy: 1e-12
         )
     }
+
+    func testAngularDistanceRejectsDecodedValuesOutsideItsRange() {
+        XCTAssertThrowsError(
+            try JSONDecoder().decode(
+                AngularDistance.self,
+                from: Data(#"{"radians":-0.1}"#.utf8)
+            )
+        )
+        XCTAssertThrowsError(
+            try JSONDecoder().decode(
+                AngularDistance.self,
+                from: Data(#"{"radians":3.2}"#.utf8)
+            )
+        )
+    }
+
+    func testAngularDistanceRoundTripsValidValue() throws {
+        let original = AngularDistance(radians: .pi)
+        let decoded = try JSONDecoder().decode(
+            AngularDistance.self,
+            from: JSONEncoder().encode(original)
+        )
+
+        XCTAssertEqual(decoded, original)
+    }
 }
