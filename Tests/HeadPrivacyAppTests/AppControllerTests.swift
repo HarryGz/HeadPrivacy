@@ -91,6 +91,43 @@ final class AppControllerTests: XCTestCase {
         f.controller.shutdown()
     }
 
+    func testRecoveryAfterCompletedCalibrationShowsExplicitStartWithoutRevealingProtection() async throws {
+        // Break caught: a later runtime recovery prompt keeps the stale `.complete` view,
+        // leaving no explicit way to start the required full calibration.
+        let f = Fixture(policy: .protectionFirst)
+        let presenter = CalibrationWindowController(controller: f.controller)
+        f.controller.onRecalibrationRequested = { presenter.present() }
+        await f.controller.start()
+        f.controller.beginCalibration()
+        f.controller.startCalibrationSampling()
+        await f.capture(-60, starting: 100)
+        await f.capture(0, starting: 1200)
+        await f.capture(60, starting: 2300)
+        await f.sample(0, at: .milliseconds(3400))
+        await f.sample(0, at: .milliseconds(3500))
+        f.controller.acceptCalibration()
+
+        XCTAssertEqual(f.controller.calibrationFlow, .complete,
+            "Successful calibration keeps its confirmation until a new recovery condition")
+        await f.sample(0, at: .milliseconds(3600))
+        await f.sample(0, at: .milliseconds(3700))
+        f.controller.receive(.failed(.motionFailed("later loss")))
+        await drain()
+
+        XCTAssertNil(f.controller.calibrationFlow,
+            "The recovery prompt must expose the idle Start Full Calibration action")
+        XCTAssertEqual(f.overlays.last, ["left", "center", "right"])
+        XCTAssertNotNil(f.overlays.lastMessage)
+        XCTAssertNotNil(presenter.window)
+
+        f.controller.beginCalibration()
+        XCTAssertEqual(f.controller.calibrationFlow, .intro)
+        XCTAssertEqual(f.controller.status, .paused)
+        XCTAssertEqual(f.overlays.last, [])
+        presenter.close()
+        f.controller.shutdown()
+    }
+
     func testExplicitFullCalibrationStartPausesAndRevealsProtection() async {
         // Break caught: separating presentation from calibration also makes the explicit
         // Start Full Calibration action a no-op.

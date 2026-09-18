@@ -925,6 +925,7 @@ final class AppController {
             defer { self.recalibrationPromptTask = nil }
             guard !Task.isCancelled, !self.terminated, self.calibrationRequired,
                   !self.permissionDenied, !self.calibrationActive else { return }
+            if self.calibrationFlow == .complete { self.calibrationFlow = nil }
             self.onRecalibrationRequested?()
         }
     }
