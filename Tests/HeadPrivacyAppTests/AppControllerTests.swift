@@ -1,0 +1,458 @@
+import XCTest
+import CoreMotion
+import HeadPrivacyCore
+import HeadPrivacyMac
+@testable import HeadPrivacyApp
+
+@MainActor
+final class AppControllerTests: XCTestCase {
+    func testCenterAndAwayDecisionsAndOverlayDeduplication() async {
+        let f = Fixture()
+        await f.controller.start()
+        await f.sample(0, at: .zero)
+        await f.sample(0, at: .milliseconds(100))
+        XCTAssertEqual(f.overlays.last, ["left", "right"])
+        XCTAssertEqual(f.controller.status, .viewing(displayName: "center"))
+        let count = f.overlays.applications.count
+        await f.sample(0, at: .milliseconds(120))
+        XCTAssertEqual(f.overlays.applications.count, count)
+        await f.sample(160, at: .milliseconds(150))
+        await f.sample(160, at: .milliseconds(270))
+        XCTAssertEqual(f.overlays.last, ["left", "center", "right"])
+        XCTAssertEqual(f.controller.status, .protecting)
+        f.controller.shutdown()
+    }
+
+    func testUnavailablePolicyAndNotificationFailureDoNotBlockRecovery() async {
+        let f = Fixture()
+        f.notifications.shouldFail = true
+        await f.controller.start()
+        await f.event(.connectionChanged(false))
+        await f.event(.failed(.motionFailed("lost")))
+        XCTAssertEqual(f.overlays.last, [])
+        XCTAssertEqual(f.notifications.outages, 1)
+        await f.event(.connectionChanged(true))
+        await f.event(.authorizationChanged(.authorized))
+        await f.event(.connectionChanged(false))
+        XCTAssertEqual(f.notifications.outages, 1)
+        var settings = f.preferences.settings
+        settings.failurePolicy = .protectionFirst
+        await f.controller.updateSettings(settings)
+        XCTAssertEqual(f.overlays.last, ["left", "center", "right"])
+        await f.event(.authorizationChanged(.denied))
+        XCTAssertEqual(f.controller.status, .permissionRequired)
+        f.controller.shutdown()
+    }
+
+    func testStaleOutageResetsOnlyOnUsableSampleAndRecoveryAllowsNewNotification() async {
+        let f = Fixture()
+        f.notifications.shouldFail = true
+        await f.controller.start()
+        await f.advance(to: .milliseconds(500))
+        XCTAssertEqual(f.notifications.outages, 1)
+        await f.event(.connectionChanged(true))
+        await f.event(.sample(.init(yaw: .init(degrees: 0), timestamp: .zero)))
+        XCTAssertEqual(f.notifications.outages, 1)
+        await f.sample(0, at: .milliseconds(510))
+        await f.sample(0, at: .milliseconds(610))
+        XCTAssertEqual(f.overlays.last, ["left", "right"])
+        await f.advance(to: .milliseconds(1110))
+        XCTAssertEqual(f.notifications.outages, 2)
+        f.controller.shutdown()
+    }
+
+    func testRealConnectionLossRequiresNewCalibrationAndDoesNotReuseRelativeAngles() async {
+        let f = Fixture()
+        await f.controller.start()
+        await f.sample(0, at: .zero)
+        await f.sample(0, at: .milliseconds(100))
+        await f.event(.connectionChanged(false))
+        await f.event(.connectionChanged(true))
+        await f.sample(0, at: .milliseconds(200))
+        await f.sample(0, at: .milliseconds(300))
+        XCTAssertTrue(f.controller.calibrationRequired)
+        XCTAssertEqual(f.controller.status, .calibrationRequired)
+        XCTAssertEqual(f.overlays.last, [])
+        XCTAssertEqual(f.motion.references, 2)
+        f.controller.shutdown()
+    }
+
+    func testStaleAtFiveHundredMillisecondsWithoutFurtherMotionEvents() async {
+        let f = Fixture()
+        await f.controller.start()
+        await f.sample(0, at: .zero)
+        await f.sample(0, at: .milliseconds(100))
+        await f.advance(to: .milliseconds(599))
+        XCTAssertEqual(f.overlays.last, ["left", "right"])
+        await f.advance(to: .milliseconds(600))
+        XCTAssertEqual(f.overlays.last, [])
+        XCTAssertEqual(f.controller.status, .headphonesUnavailable)
+        XCTAssertEqual(f.notifications.outages, 1)
+        f.controller.shutdown()
+    }
+
+    func testPauseHotkeyResumeAndShutdownOwnOneConsumer() async {
+        let f = Fixture(policy: .protectionFirst)
+        await f.controller.start()
+        await f.controller.start()
+        f.hotkey.handler?()
+        XCTAssertEqual(f.controller.status, .paused)
+        XCTAssertEqual(f.overlays.last, [])
+        await f.event(.authorizationChanged(.authorized))
+        await f.sample(0, at: .milliseconds(200))
+        XCTAssertEqual(f.controller.status, .paused)
+        f.hotkey.handler?()
+        await f.sample(0, at: .milliseconds(300))
+        await f.sample(0, at: .milliseconds(400))
+        XCTAssertEqual(f.controller.status, .viewing(displayName: "center"))
+        XCTAssertEqual(f.motion.starts, 1)
+        XCTAssertEqual(f.motion.stops, 0)
+        XCTAssertEqual(f.motion.references, 1)
+        XCTAssertEqual(f.motion.streamReads, 1)
+        XCTAssertEqual(f.displays.streamReads, 1)
+        f.controller.shutdown()
+        await drain()
+        XCTAssertEqual(f.overlays.last, [])
+        XCTAssertTrue(f.overlays.reconciled.last!.isEmpty)
+        XCTAssertNil(f.hotkey.handler)
+        XCTAssertEqual(f.motion.stops, 1)
+        let applications = f.overlays.applications.count
+        await f.event(.connectionChanged(false))
+        XCTAssertEqual(f.overlays.applications.count, applications)
+    }
+
+    func testSleepStopsMotionAndWakeRequiresCalibrationWithoutOverridingPause() async {
+        let f = Fixture(policy: .protectionFirst)
+        await f.controller.start()
+        f.controller.prepareForSleep()
+        XCTAssertEqual(f.motion.stops, 1)
+        XCTAssertEqual(f.overlays.last, ["left", "center", "right"])
+        f.controller.resumeAfterWake()
+        XCTAssertEqual(f.motion.starts, 2)
+        XCTAssertEqual(f.motion.references, 2)
+        XCTAssertTrue(f.controller.calibrationRequired)
+        XCTAssertEqual(f.controller.status, .calibrationRequired)
+        f.controller.pause()
+        f.controller.prepareForSleep()
+        f.controller.resumeAfterWake()
+        XCTAssertEqual(f.controller.status, .paused)
+        XCTAssertEqual(f.overlays.last, [])
+        f.controller.shutdown()
+    }
+
+    func testTopologyInvalidationPersistsBeforeAcknowledgingAndBlocksResume() async {
+        let f = Fixture(policy: .protectionFirst)
+        await f.controller.start()
+        f.displays.change(to: Array(f.displays.displays.dropLast()))
+        await drain()
+        XCTAssertEqual(f.controller.status, .calibrationRequired)
+        XCTAssertTrue(f.calibrations.values.isEmpty)
+        XCTAssertEqual(f.displays.acknowledged, Set(["left", "center", "right"].map(DisplayID.init(rawValue:))))
+        XCTAssertEqual(f.overlays.last, ["left", "center"])
+        let starts = f.motion.starts
+        f.controller.resume()
+        XCTAssertEqual(f.motion.starts, starts)
+        f.controller.pause()
+        f.displays.change(to: [f.displays.displays[0]])
+        await drain()
+        XCTAssertEqual(f.controller.status, .paused)
+        XCTAssertEqual(f.overlays.last, [])
+        f.controller.shutdown()
+    }
+
+    func testFailedPersistenceAndInterveningTopologyNeverAcknowledgeInvalidation() async {
+        let f = Fixture()
+        await f.controller.start()
+        f.calibrations.shouldFail = true
+        f.displays.change(to: Array(f.displays.displays.dropLast()))
+        await drain()
+        XCTAssertTrue(f.displays.acknowledged.isEmpty)
+        XCTAssertNotNil(f.controller.serviceError)
+        XCTAssertEqual(f.controller.status, .calibrationRequired)
+        f.calibrations.shouldFail = false
+        f.controller.resume()
+        XCTAssertTrue(f.calibrations.values.isEmpty)
+        XCTAssertFalse(f.displays.acknowledged.isEmpty)
+        f.controller.shutdown()
+
+        let g = Fixture()
+        await g.controller.start()
+        g.calibrations.onSave = {
+            g.calibrations.onSave = nil
+            g.displays.change(to: [g.displays.displays[0]])
+        }
+        var savesAtAcknowledgement: [Int] = []
+        g.displays.onAcknowledgement = { savesAtAcknowledgement.append(g.calibrations.saves) }
+        g.displays.change(to: Array(g.displays.displays.dropLast()))
+        await drain()
+        XCTAssertEqual(savesAtAcknowledgement, [2])
+        XCTAssertEqual(g.controller.status, .calibrationRequired)
+        g.controller.shutdown()
+    }
+
+    func testUnsafeTopologyAndNonpersistableIDsCannotStartMotion() async {
+        for ambiguous in [false, true] {
+            let f = Fixture()
+            let first = f.displays.displays[0]
+            f.displays.displays = [first, DisplayDescriptor(id: .init(rawValue: "unsafe"), name: "unsafe",
+                frame: ambiguous ? CGRect(x: 1000, y: 0, width: 1000, height: 800) : first.frame,
+                isBuiltIn: false, isPersistable: !ambiguous)]
+            await f.controller.start()
+            XCTAssertEqual(f.controller.status, .calibrationRequired)
+            XCTAssertEqual(f.motion.starts, 0)
+            f.controller.shutdown()
+        }
+    }
+
+    func testSettingsReapplyAppearanceAndConfigureDwellFilterAndServiceErrors() async {
+        let f = Fixture()
+        f.hotkey.shouldFail = true
+        f.login.shouldFail = true
+        await f.controller.start()
+        XCTAssertNotNil(f.controller.serviceError)
+        var settings = f.preferences.settings
+        settings.switchDwell = .milliseconds(300)
+        settings.filterAlpha = 1
+        settings.overlayOpacity = 9
+        await f.controller.updateSettings(settings)
+        await f.sample(0, at: .zero)
+        await f.sample(0, at: .milliseconds(100))
+        XCTAssertEqual(f.overlays.last, [])
+        await f.sample(0, at: .milliseconds(300))
+        XCTAssertEqual(f.overlays.last, ["left", "right"])
+        let count = f.overlays.applications.count
+        settings.overlayOpacity = 0.2
+        await f.controller.updateSettings(settings)
+        XCTAssertGreaterThan(f.overlays.applications.count, count)
+        XCTAssertEqual(f.overlays.applications.last?.1.overlayOpacity, 0.2)
+        f.controller.shutdown()
+    }
+
+    func testStoredPerDisplayWidthsAndConfiguredSmoothingAffectClassification() async {
+        let f = Fixture()
+        f.calibrations.values[1].halfWidth = .init(degrees: 5)
+        f.calibrations.values[2].halfWidth = .init(degrees: 35)
+        await f.controller.start()
+        var settings = f.preferences.settings
+        settings.zoneHalfWidth = .init(degrees: 90)
+        settings.filterAlpha = 0
+        await f.controller.updateSettings(settings)
+        await f.sample(12, at: .zero)
+        await f.sample(0, at: .milliseconds(120))
+        XCTAssertEqual(f.overlays.last, ["left", "center", "right"])
+        settings.filterAlpha = 1
+        await f.controller.updateSettings(settings)
+        await f.sample(90, at: .milliseconds(150))
+        await f.sample(90, at: .milliseconds(250))
+        XCTAssertEqual(f.overlays.last, ["left", "center"])
+        f.controller.shutdown()
+    }
+
+    func testSlowNotificationCannotBlockProtectionOrPause() async {
+        let f = Fixture()
+        f.notifications.suspendDelivery = true
+        await f.controller.start()
+        await f.advance(to: .milliseconds(500))
+        XCTAssertEqual(f.notifications.outages, 1)
+        await f.sample(0, at: .milliseconds(510))
+        await f.sample(0, at: .milliseconds(610))
+        XCTAssertEqual(f.overlays.last, ["left", "right"])
+        f.controller.pause()
+        XCTAssertEqual(f.overlays.last, [])
+        f.notifications.delivery?.resume()
+        f.notifications.delivery = nil
+        f.controller.shutdown()
+    }
+
+    func testLatestTopologyIsCheckedBeforeProcessingQueuedSample() async {
+        let f = Fixture()
+        await f.controller.start()
+        await f.sample(0, at: .zero)
+        await f.sample(0, at: .milliseconds(100))
+        // Registry state changes before its async change notification has been consumed.
+        f.displays.displays.removeLast()
+        await f.sample(0, at: .milliseconds(200))
+        XCTAssertEqual(f.controller.status, .calibrationRequired)
+        XCTAssertEqual(f.overlays.last, [])
+        XCTAssertTrue(f.calibrations.values.isEmpty)
+        f.controller.shutdown()
+    }
+
+    func testTemporaryRevealRequiresExplicitResumeAndRecalibrationHook() async {
+        let f = Fixture(policy: .protectionFirst)
+        await f.controller.start()
+        f.controller.temporarilyRevealAll()
+        await f.event(.authorizationChanged(.authorized))
+        XCTAssertEqual(f.overlays.last, [])
+        var requested = false
+        f.controller.onRecalibrationRequested = { requested = true }
+        f.controller.requestRecalibration()
+        XCTAssertTrue(requested)
+        XCTAssertEqual(f.overlays.last, [])
+        f.controller.resume()
+        XCTAssertEqual(f.controller.status, .calibrationRequired)
+        await f.sample(0, at: .zero)
+        await f.sample(0, at: .milliseconds(100))
+        XCTAssertEqual(f.controller.status, .calibrationRequired)
+        f.controller.shutdown()
+    }
+
+    func testChangingFailurePolicyDuringAnOutageRevealsAndNotifies() async {
+        let f = Fixture(policy: .protectionFirst)
+        await f.controller.start()
+        await f.advance(to: .milliseconds(500))
+        XCTAssertEqual(f.overlays.last, ["left", "center", "right"])
+        XCTAssertEqual(f.notifications.outages, 0)
+        var settings = f.preferences.settings
+        settings.failurePolicy = .usabilityFirst
+        await f.controller.updateSettings(settings)
+        await drain()
+        XCTAssertEqual(f.overlays.last, [])
+        XCTAssertEqual(f.notifications.outages, 1)
+        f.controller.shutdown()
+    }
+}
+
+@MainActor private func drain() async { for _ in 0..<40 { await Task.yield() } }
+private enum TestError: Error { case unavailable }
+
+@MainActor
+private final class Fixture {
+    let motion = MotionFake()
+    let displays = DisplayFake()
+    let overlays = OverlaySpy()
+    let preferences = PreferencesFake()
+    let calibrations = CalibrationFake()
+    let notifications = NotificationsFake()
+    let hotkey = HotkeyFake()
+    let login = LoginFake()
+    let timing = TimingFake()
+    lazy var controller = AppController(motion: motion, displays: displays, overlays: overlays,
+        preferences: preferences, calibrationStore: calibrations, notifications: notifications,
+        hotkey: hotkey, loginItem: login, timing: timing)
+
+    init(policy: FailurePolicy = .usabilityFirst) {
+        preferences.settings = AppSettings(failurePolicy: policy, filterAlpha: 1)
+        displays.displays = ["left", "center", "right"].enumerated().map { i, name in
+            DisplayDescriptor(id: .init(rawValue: name), name: name,
+                frame: CGRect(x: i * 1000, y: 0, width: 1000, height: 800), isBuiltIn: i == 1, isPersistable: true)
+        }
+        calibrations.values = zip(displays.displays, [-60.0, 0, 60]).map {
+            DisplayCalibration(displayID: $0.0.id, displayName: $0.0.name,
+                centerYaw: .init(degrees: $0.1), halfWidth: .init(degrees: 25))
+        }
+    }
+    func event(_ event: MotionEvent) async { motion.continuation.yield(event); await drain() }
+    func sample(_ yaw: Double, at time: Duration) async {
+        timing.time = time
+        await event(.sample(.init(yaw: .init(degrees: yaw), timestamp: time)))
+    }
+    func advance(to time: Duration) async { timing.advance(to: time); await drain() }
+}
+
+private final class MotionFake: MotionProviding {
+    let stream: AsyncStream<MotionEvent>
+    let continuation: AsyncStream<MotionEvent>.Continuation
+    var streamReads = 0
+    var starts = 0
+    var stops = 0
+    var references = 0
+    var events: AsyncStream<MotionEvent> { streamReads += 1; return stream }
+    init() { (stream, continuation) = AsyncStream.makeStream() }
+    func start() { starts += 1 }
+    func stop() { stops += 1 }
+    func captureReference() { references += 1 }
+}
+
+@MainActor private final class DisplayFake: DisplayRegistryProviding {
+    var displays: [DisplayDescriptor] = []
+    let stream: AsyncStream<[DisplayDescriptor]>
+    let continuation: AsyncStream<[DisplayDescriptor]>.Continuation
+    var streamReads = 0
+    var changes: AsyncStream<[DisplayDescriptor]> { streamReads += 1; return stream }
+    var invalid = Set<DisplayID>()
+    var acknowledged = Set<DisplayID>()
+    var onAcknowledgement: (() -> Void)?
+    init() { (stream, continuation) = AsyncStream.makeStream() }
+    func invalidCalibrationIDs(for values: [DisplayCalibration]) -> Set<DisplayID> {
+        Set(values.map(\.displayID)).intersection(invalid)
+    }
+    func acknowledgeCalibrationResolution(for ids: Set<DisplayID>) { onAcknowledgement?(); acknowledged.formUnion(ids); invalid.subtract(ids) }
+    func change(to values: [DisplayDescriptor]) {
+        invalid.formUnion(displays.map(\.id)); displays = values; continuation.yield(values)
+    }
+}
+
+@MainActor private final class OverlaySpy: OverlayCoordinating {
+    var applications: [(Set<DisplayID>, AppSettings)] = []
+    var reconciled: [[DisplayDescriptor]] = []
+    var last: Set<String> { Set(applications.last?.0.map(\.rawValue) ?? []) }
+    func reconcile(displays: [DisplayDescriptor]) { reconciled.append(displays) }
+    func apply(protectedDisplayIDs: Set<DisplayID>, settings: AppSettings, animated: Bool) {
+        applications.append((protectedDisplayIDs, settings))
+    }
+}
+@MainActor private final class PreferencesFake: AppPreferencesProviding { var settings = AppSettings.defaults }
+@MainActor private final class CalibrationFake: CalibrationPersisting {
+    var values: [DisplayCalibration] = []
+    var shouldFail = false
+    var onSave: (() -> Void)?
+    var saves = 0
+    func load() throws -> [DisplayCalibration] { values }
+    func save(_ values: [DisplayCalibration]) throws {
+        saves += 1
+        if shouldFail { throw TestError.unavailable }
+        self.values = values; onSave?()
+    }
+}
+@MainActor private final class NotificationsFake: NotificationControlling {
+    var isEnabled = true
+    var outages = 0
+    var shouldFail = false
+    var suspendDelivery = false
+    var delivery: CheckedContinuation<Void, Never>?
+    func requestAuthorizationFromSettings() async throws -> Bool { true }
+    func motionBecameUnavailable(failurePolicy: FailurePolicy) async throws {
+        outages += 1
+        if shouldFail { throw TestError.unavailable }
+        if suspendDelivery { await withCheckedContinuation { delivery = $0 } }
+    }
+    func motionBecameAvailable() {}
+}
+@MainActor private final class HotkeyFake: GlobalHotKeyRegistering {
+    var handler: (@MainActor () -> Void)?
+    var shouldFail = false
+    func register(_ descriptor: HotkeyDescriptor, handler: @escaping @MainActor () -> Void) throws {
+        if shouldFail { throw TestError.unavailable }; self.handler = handler
+    }
+    func unregister() { handler = nil }
+}
+@MainActor private final class LoginFake: LoginItemControlling {
+    var status: LoginItemStatus = .notRegistered
+    var isEnabled = false
+    var shouldFail = false
+    func setEnabled(_ enabled: Bool) async throws { if shouldFail { throw TestError.unavailable }; isEnabled = enabled }
+}
+@MainActor private final class TimingFake: AppControllerTiming {
+    var time: Duration = .zero
+    var waiters: [UUID: (Duration, CheckedContinuation<Void, any Error>)] = [:]
+    func now() -> Duration { time }
+    func sleep(until deadline: Duration) async throws {
+        if deadline <= time { return }
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            try await withCheckedThrowingContinuation { waiters[id] = (deadline, $0) }
+            try Task.checkCancellation()
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.waiters.removeValue(forKey: id)?.1.resume(throwing: CancellationError())
+            }
+        }
+    }
+    func advance(to value: Duration) {
+        time = value
+        let ready = waiters.filter { $0.value.0 <= value }
+        for (id, waiter) in ready { waiters.removeValue(forKey: id); waiter.1.resume() }
+    }
+}

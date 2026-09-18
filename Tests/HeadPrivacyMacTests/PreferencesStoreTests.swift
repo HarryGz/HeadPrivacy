@@ -205,6 +205,47 @@ final class SystemConvenienceTests: XCTestCase {
         XCTAssertEqual(system.registrations.count, 1)
     }
 
+    // Break caught: replacing an active shortcut fails but its already queued callback still fires.
+    func testFailedActiveHotkeyReplacementSuppressesQueuedOldCallback() async throws {
+        let system = FakeHotKeySystem()
+        let registrar = GlobalHotKeyRegistrar(system: system)
+        var callbacks = 0
+        try registrar.register(.default) { callbacks += 1 }
+        let id = try XCTUnwrap(system.registrations.last?.id)
+        let callback = try XCTUnwrap(system.callback)
+        callback(id)
+        system.shouldFail = true
+        XCTAssertThrowsError(try registrar.register(.init(key: "K", modifiers: [.command])) {
+            callbacks += 1
+        })
+        callback(id)
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(callbacks, 0)
+        XCTAssertEqual(system.unregistrations, 1)
+        system.shouldFail = false
+        let recovered = expectation(description: "Replacement callback")
+        try registrar.register(.default) { recovered.fulfill() }
+        callback(try XCTUnwrap(system.registrations.last?.id))
+        await fulfillment(of: [recovered], timeout: 1)
+    }
+
+    // Break caught: a failed notification delivery is retried during the same outage.
+    func testFailedNotificationIsNotRetriedUntilMotionRecovery() async throws {
+        let center = FakeNotificationCenter()
+        center.shouldFail = true
+        let controller = NotificationController(isEnabled: true, center: center)
+        do {
+            try await controller.motionBecameUnavailable(failurePolicy: .usabilityFirst)
+            XCTFail("Expected delivery error")
+        } catch {}
+        center.shouldFail = false
+        try await controller.motionBecameUnavailable(failurePolicy: .usabilityFirst)
+        XCTAssertEqual(center.notifications.count, 1)
+        controller.motionBecameAvailable()
+        try await controller.motionBecameUnavailable(failurePolicy: .usabilityFirst)
+        XCTAssertEqual(center.notifications.count, 2)
+    }
+
     // Break caught: notification opt-out is ignored, authorization happens at launch, or an outage floods alerts.
     func testNotificationsRequireExplicitAuthorizationActionAndDeduplicateEachOutage() async throws {
         let center = FakeNotificationCenter()
@@ -312,6 +353,7 @@ private final class FakeNotificationCenter: NotificationCenterClient {
     var authorizationRequests = 0
     var notifications: [String] = []
     var suspendDelivery = false
+    var shouldFail = false
     var deliveryContinuation: CheckedContinuation<Void, Never>?
     var onDeliveryStarted: (() -> Void)?
 
@@ -321,6 +363,7 @@ private final class FakeNotificationCenter: NotificationCenterClient {
     }
     func postMotionUnavailable(identifier: String) async throws {
         notifications.append(identifier)
+        if shouldFail { throw SystemTestError.unavailable }
         if suspendDelivery {
             await withCheckedContinuation {
                 deliveryContinuation = $0

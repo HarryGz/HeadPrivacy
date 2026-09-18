@@ -16,5 +16,6 @@ let package = Package(
         .executableTarget(name: "HeadPrivacyApp", dependencies: ["HeadPrivacyCore", "HeadPrivacyMac"]),
         .testTarget(name: "HeadPrivacyCoreTests", dependencies: ["HeadPrivacyCore"]),
         .testTarget(name: "HeadPrivacyMacTests", dependencies: ["HeadPrivacyMac", "HeadPrivacyCore"]),
+        .testTarget(name: "HeadPrivacyAppTests", dependencies: ["HeadPrivacyApp", "HeadPrivacyMac", "HeadPrivacyCore"]),
     ]
 )
