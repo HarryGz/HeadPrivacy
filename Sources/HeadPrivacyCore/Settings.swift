@@ -3,13 +3,6 @@ public enum ProtectionMode: String, Codable, CaseIterable, Sendable {
     case sides
 }
 
-@available(*, deprecated, message: "Use OverlayEffect and effectStrength.")
-public enum VisualPreset: String, CaseIterable, Sendable {
-    case soft
-    case translucent
-    case privacy
-}
-
 public enum FailurePolicy: String, Codable, CaseIterable, Sendable {
     case usabilityFirst
     case protectionFirst
@@ -99,64 +92,6 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public static let filterAlphaRange: ClosedRange<Double> = 0.05...1
     public static let effectStrengthRange: ClosedRange<Double> = 0...1
     public static let textureAmountRange: ClosedRange<Double> = 0...1
-
-    // Temporary source compatibility for the renderer and controls until their v2 conversion.
-    // Computed properties are deliberately absent from the synthesized Codable payload.
-    @available(*, deprecated, message: "Use overlayEffect and effectStrength.")
-    public var visualPreset: VisualPreset {
-        get {
-            if effectStrength < 0.44 { return .soft }
-            if effectStrength < 0.715 { return .translucent }
-            return .privacy
-        }
-        set {
-            overlayEffect = .frosted
-            switch newValue {
-            case .soft: effectStrength = 0.30
-            case .translucent: effectStrength = 0.58
-            case .privacy: effectStrength = 0.85
-            }
-        }
-    }
-
-    @available(*, deprecated, message: "Use overlayColor.")
-    public var tintBrightness: Double {
-        get { (overlayColor.red + overlayColor.green + overlayColor.blue) / 3 * 2 - 1 }
-        set {
-            guard newValue.isFinite else { overlayColor = .eyeFriendly; return }
-            let gray = (min(max(newValue, -1), 1) + 1) / 2
-            overlayColor = OverlayColor(red: gray, green: gray, blue: gray)
-        }
-    }
-
-    @available(*, deprecated, message: "Use the schema-v2 appearance initializer.")
-    public init(
-        schemaVersion: Int = 2,
-        protectionMode: ProtectionMode = .sides,
-        visualPreset: VisualPreset = .translucent,
-        failurePolicy: FailurePolicy = .usabilityFirst,
-        overlayOpacity: Double = 0.5,
-        tintBrightness: Double,
-        sideWidthFraction: Double = 0.25,
-        filterAlpha: Double = 0.25,
-        zoneHalfWidth: Angle = .init(degrees: 25),
-        switchDwell: Duration = .milliseconds(100),
-        awayDwell: Duration = .milliseconds(120),
-        returnDwell: Duration = .milliseconds(100),
-        notificationsEnabled: Bool = true,
-        launchAtLogin: Bool = false,
-        hotkeyDescriptor: HotkeyDescriptor = .default
-    ) {
-        self.init(schemaVersion: schemaVersion, protectionMode: protectionMode,
-                  failurePolicy: failurePolicy, overlayOpacity: overlayOpacity,
-                  sideWidthFraction: sideWidthFraction, filterAlpha: filterAlpha,
-                  zoneHalfWidth: zoneHalfWidth, switchDwell: switchDwell,
-                  awayDwell: awayDwell, returnDwell: returnDwell,
-                  notificationsEnabled: notificationsEnabled, launchAtLogin: launchAtLogin,
-                  hotkeyDescriptor: hotkeyDescriptor)
-        self.visualPreset = visualPreset
-        self.tintBrightness = tintBrightness
-    }
 
     /// Clamps finite values to inclusive UI/persistence bounds: opacity 0...1, filter alpha 0.05...1,
     /// appearance strength/texture/color 0...1, each side's width fraction 0.1...0.45, zone half-width 5...90°,

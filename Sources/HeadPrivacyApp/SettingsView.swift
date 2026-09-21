@@ -4,6 +4,7 @@ import HeadPrivacyCore
 
 struct SettingsView: View {
     let controller: AppController
+    @State private var advancedAppearanceExpanded = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -61,18 +62,35 @@ struct SettingsView: View {
         Form {
             Picker("Mode", selection: binding(\.protectionMode)) {
                 Text("Full screen").tag(ProtectionMode.fullScreen)
-                Text("Sides").tag(ProtectionMode.sides)
+                Text("Sides only").tag(ProtectionMode.sides)
             }
-            Picker("Preset", selection: binding(\.visualPreset)) {
-                Text("Soft").tag(VisualPreset.soft)
-                Text("Translucent").tag(VisualPreset.translucent)
-                Text("Privacy").tag(VisualPreset.privacy)
+            .accessibilityLabel("Protection mode")
+            .accessibilityValue(controller.settings.protectionMode == .fullScreen ? "Full screen" : "Sides only")
+            Picker("Effect", selection: binding(\.overlayEffect)) {
+                Text("Frosted").tag(OverlayEffect.frosted)
+                Text("Mist").tag(OverlayEffect.mist)
+                Text("Raindrop").tag(OverlayEffect.raindrop)
             }
-            Section("Advanced Appearance") {
-                numeric("Opacity", value: binding(\.overlayOpacity), range: 0...1)
-                numeric("Tint brightness", value: binding(\.tintBrightness), range: -1...1)
-                numeric("Width of each side", value: binding(\.sideWidthFraction), range: 0.1...0.45)
+            .pickerStyle(.segmented)
+            .accessibilityLabel("Effect")
+            .accessibilityValue(controller.settings.overlayEffect.rawValue.capitalized)
+            ColorPicker("Color", selection: overlayColorBinding, supportsOpacity: false)
+                .accessibilityLabel("Overlay color")
+                .accessibilityValue(overlayColorAccessibilityValue)
+            Button("Use Default Color") { edit { $0.overlayColor = .eyeFriendly } }
+                .accessibilityLabel("Use Default Color")
+                .accessibilityValue(controller.settings.overlayColor == .eyeFriendly ? "Default color selected" : "Custom color selected")
+            numeric("Effect strength", value: binding(\.effectStrength), range: 0...1)
+            numeric("Opacity", value: binding(\.overlayOpacity), range: 0...1)
+
+            DisclosureGroup("Advanced Effect Controls", isExpanded: $advancedAppearanceExpanded) {
+                numeric(textureLabel, value: binding(\.textureAmount), range: 0...1)
+                if controller.settings.protectionMode == .sides {
+                    numeric("Width of each side", value: binding(\.sideWidthFraction), range: 0.1...0.45)
+                }
             }
+            .accessibilityLabel("Advanced Effect Controls")
+            .accessibilityValue(advancedAppearanceExpanded ? "Expanded" : "Collapsed")
             Text("The display you face stays clear. System materials obscure other displays without capturing their contents.").font(.callout)
         }.formStyle(.grouped)
     }
@@ -132,6 +150,28 @@ struct SettingsView: View {
         Binding(get: { controller.settings[keyPath: keyPath] }, set: { value in edit { $0[keyPath: keyPath] = value } })
     }
 
+    private var overlayColorBinding: Binding<Color> {
+        Binding(
+            get: { controller.settings.overlayColor.swiftUIColor },
+            set: { color in
+                guard let value = OverlayColor(swiftUIColor: color) else { return }
+                edit { $0.overlayColor = value }
+            })
+    }
+
+    private var textureLabel: String {
+        switch controller.settings.overlayEffect {
+        case .frosted: "Grain amount"
+        case .mist: "Mist spread"
+        case .raindrop: "Droplet density"
+        }
+    }
+
+    private var overlayColorAccessibilityValue: String {
+        let color = controller.settings.overlayColor
+        return "Red \(color.red.formatted(.percent.precision(.fractionLength(0)))), green \(color.green.formatted(.percent.precision(.fractionLength(0)))), blue \(color.blue.formatted(.percent.precision(.fractionLength(0))))"
+    }
+
     private func edit(_ change: @escaping @MainActor (inout AppSettings) -> Void) {
         Task { @MainActor in
             var value = controller.settings
@@ -155,7 +195,9 @@ struct SettingsView: View {
                 Text(value.wrappedValue.formatted(.number.precision(.fractionLength(0...2))))
                     .monospacedDigit()
             }
-            Slider(value: value, in: range, step: step).accessibilityLabel(title)
+            Slider(value: value, in: range, step: step)
+                .accessibilityLabel(title)
+                .accessibilityValue(value.wrappedValue.formatted(.number.precision(.fractionLength(0...2))))
         }
     }
 }

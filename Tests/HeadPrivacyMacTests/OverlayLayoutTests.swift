@@ -106,6 +106,30 @@ final class OverlayLayoutTests: XCTestCase {
     }
 
     @MainActor
+    func testSidesToFullScreenToSidesPreservesSurvivingPaneAndTexture() throws {
+        // Break caught: changing coverage replaces the pane shared by both modes.
+        let view = OverlayView(frame: bounds)
+        let pane = try XCTUnwrap(view.subviews.first as? ProtectionPane)
+        let texture = try XCTUnwrap(pane.textureView)
+        let removedPane = try XCTUnwrap(view.subviews.last as? ProtectionPane)
+        view.apply(settings: AppSettings(protectionMode: .fullScreen))
+        XCTAssertEqual(view.subviews.count, 1)
+        XCTAssertTrue(view.subviews.first === pane)
+        XCTAssertTrue(pane.textureView === texture)
+        XCTAssertNil(removedPane.superview)
+        XCTAssertEqual(pane.frame, bounds)
+
+        view.apply(settings: AppSettings(protectionMode: .sides))
+        XCTAssertEqual(view.subviews.count, 2)
+        XCTAssertTrue(view.subviews.first === pane)
+        XCTAssertTrue(pane.textureView === texture)
+        XCTAssertEqual(view.subviews.map(\.frame), [
+            CGRect(x: 0, y: 0, width: 360, height: 900),
+            CGRect(x: 1080, y: 0, width: 360, height: 900),
+        ])
+    }
+
+    @MainActor
     func testResizeAndStyleSwitchDoNotAccumulatePaneChildren() throws {
         // Break caught: repeated style and resize updates retain stale panes or texture children.
         let view = OverlayView(frame: bounds)

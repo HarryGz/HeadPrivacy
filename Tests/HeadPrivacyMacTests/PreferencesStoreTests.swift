@@ -216,7 +216,8 @@ final class PreferencesStoreTests: XCTestCase {
     // Break caught: invalid persisted values bypass the same bounds used by live edits.
     func testPersistenceAndDirectDecodingClampEveryNumericSetting() throws {
         try withDefaults { defaults in
-            let invalid = AppSettings(overlayOpacity: 8, tintBrightness: -8,
+            let invalid = AppSettings(overlayColor: .init(red: -8, green: -8, blue: -8),
+                effectStrength: 2, textureAmount: -1, overlayOpacity: 8,
                 sideWidthFraction: 0, filterAlpha: -1, zoneHalfWidth: .init(degrees: 110),
                 switchDwell: .seconds(-1), awayDwell: .seconds(2), returnDwell: .seconds(-2))
             let data = try JSONEncoder().encode(invalid)
@@ -224,7 +225,9 @@ final class PreferencesStoreTests: XCTestCase {
             for value in [invalid.validated(), try JSONDecoder().decode(AppSettings.self, from: data),
                           PreferencesStore(defaults: defaults).settings] {
                 XCTAssertEqual(value.overlayOpacity, 1)
-                XCTAssertEqual(value.tintBrightness, -1)
+                XCTAssertEqual(value.overlayColor, .init(red: 0, green: 0, blue: 0))
+                XCTAssertEqual(value.effectStrength, 1)
+                XCTAssertEqual(value.textureAmount, 0)
                 XCTAssertEqual(value.sideWidthFraction, 0.1)
                 XCTAssertEqual(value.filterAlpha, 0.05)
                 XCTAssertEqual(value.zoneHalfWidth.degrees, 90, accuracy: 1e-10)
@@ -233,13 +236,16 @@ final class PreferencesStoreTests: XCTestCase {
                 XCTAssertEqual(value.returnDwell, .zero)
             }
             let store = PreferencesStore(defaults: defaults)
-            store.settings = AppSettings(overlayOpacity: -1, tintBrightness: 2,
+            store.settings = AppSettings(overlayColor: .init(red: 2, green: 2, blue: 2),
+                effectStrength: -1, textureAmount: 2, overlayOpacity: -1,
                 sideWidthFraction: 2, filterAlpha: 2, zoneHalfWidth: .init(degrees: 1),
                 switchDwell: .seconds(2), awayDwell: .seconds(-1), returnDwell: .seconds(2))
             let saved = try JSONDecoder().decode(AppSettings.self,
                 from: XCTUnwrap(defaults.data(forKey: "appSettings.v1")))
             XCTAssertEqual(saved.overlayOpacity, 0)
-            XCTAssertEqual(saved.tintBrightness, 1)
+            XCTAssertEqual(saved.overlayColor, .init(red: 1, green: 1, blue: 1))
+            XCTAssertEqual(saved.effectStrength, 0)
+            XCTAssertEqual(saved.textureAmount, 1)
             XCTAssertEqual(saved.sideWidthFraction, 0.45)
             XCTAssertEqual(saved.filterAlpha, 1)
             XCTAssertEqual(saved.zoneHalfWidth.degrees, 5, accuracy: 1e-10)
@@ -252,10 +258,12 @@ final class PreferencesStoreTests: XCTestCase {
     // Break caught: valid inclusive boundary values are shifted during validation/decoding.
     func testInclusiveBoundsSurviveDirectRoundTrip() throws {
         for settings in [
-            AppSettings(overlayOpacity: 0, tintBrightness: -1, sideWidthFraction: 0.1,
+            AppSettings(overlayColor: .init(red: 0, green: 0, blue: 0),
+                effectStrength: 0, textureAmount: 0, overlayOpacity: 0, sideWidthFraction: 0.1,
                 filterAlpha: 0.05, zoneHalfWidth: .init(degrees: 5), switchDwell: .zero,
                 awayDwell: .zero, returnDwell: .zero),
-            AppSettings(overlayOpacity: 1, tintBrightness: 1, sideWidthFraction: 0.45,
+            AppSettings(overlayColor: .init(red: 1, green: 1, blue: 1),
+                effectStrength: 1, textureAmount: 1, overlayOpacity: 1, sideWidthFraction: 0.45,
                 filterAlpha: 1, zoneHalfWidth: .init(degrees: 90), switchDwell: .seconds(1),
                 awayDwell: .seconds(1), returnDwell: .seconds(1))
         ] {
@@ -280,7 +288,8 @@ final class PreferencesStoreTests: XCTestCase {
     // Break caught: NaN/infinity can escape validation and make settings unpersistable.
     func testNonfiniteNumbersUseDefaultsIncludingConfiguredJSONDecoding() throws {
         for number in [Double.nan, .infinity, -.infinity] {
-            let settings = AppSettings(overlayOpacity: number, tintBrightness: number,
+            let settings = AppSettings(overlayColor: .init(red: number, green: number, blue: number),
+                effectStrength: number, textureAmount: number, overlayOpacity: number,
                 sideWidthFraction: number, filterAlpha: number, zoneHalfWidth: .init(radians: number))
             XCTAssertEqual(settings.validated(), .defaults)
             let encoder = JSONEncoder()

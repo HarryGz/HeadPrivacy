@@ -10,9 +10,8 @@ final class SettingsTests: XCTestCase {
         XCTAssertEqual(AppSettings.defaults.effectStrength, 0.58)
         XCTAssertEqual(AppSettings.defaults.textureAmount, 0.35)
         XCTAssertEqual(AppSettings.defaults.overlayOpacity, 0.5)
-        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(AppSettings.defaults)) as? [String: Any])
-        XCTAssertNil(json["visualPreset"])
-        XCTAssertNil(json["tintBrightness"])
+        let decoded = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(AppSettings.defaults))
+        XCTAssertEqual(decoded, .defaults)
     }
 
     // Break caught: nonfinite appearance values cannot persist or out-of-range controls escape bounds.
@@ -36,7 +35,6 @@ final class SettingsTests: XCTestCase {
     // Break caught: changing the product's baseline privacy behavior or timing.
     func testDefaultsMatchTheProductBaseline() {
         XCTAssertEqual(AppSettings.defaults.protectionMode, .sides)
-        XCTAssertEqual(AppSettings.defaults.visualPreset, .translucent)
         XCTAssertEqual(AppSettings.defaults.failurePolicy, .usabilityFirst)
         XCTAssertEqual(AppSettings.defaults.zoneHalfWidth.degrees, 25, accuracy: 1e-9)
         XCTAssertEqual(AppSettings.defaults.switchDwell, .milliseconds(100))
