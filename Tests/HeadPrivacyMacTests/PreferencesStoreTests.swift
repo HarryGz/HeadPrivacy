@@ -21,10 +21,152 @@ final class PreferencesStoreTests: XCTestCase {
             defaults.set(Data("broken".utf8), forKey: "appSettings.v1")
             XCTAssertEqual(PreferencesStore(defaults: defaults).settings, .defaults)
             var future = AppSettings.defaults
-            future.schemaVersion = 2
+            future.schemaVersion = 99
             future.overlayOpacity = 0.8
             defaults.set(try JSONEncoder().encode(future), forKey: "appSettings.v1")
             XCTAssertEqual(PreferencesStore(defaults: defaults).settings, .defaults)
+        }
+    }
+
+    // Literal fixtures guard against accidentally testing the current encoder as a v1 encoder.
+    private func legacyDictionary(preset: String) -> [String: Any] {
+        ["schemaVersion": 1, "protectionMode": "fullScreen", "visualPreset": preset,
+         "failurePolicy": "protectionFirst", "overlayOpacity": 0.73, "tintBrightness": -0.4,
+         "sideWidthFraction": 0.32, "filterAlpha": 0.7, "zoneHalfWidth": ["radians": 0.6],
+         "switchDwell": [0, 200_000_000_000_000_000],
+         "awayDwell": [0, 300_000_000_000_000_000],
+         "returnDwell": [0, 400_000_000_000_000_000],
+         "notificationsEnabled": false, "launchAtLogin": true,
+         "hotkeyDescriptor": ["key": "K", "modifiers": ["command", "shift"]]]
+    }
+
+    private func assertPreservedNonappearance(_ value: AppSettings, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertEqual(value.protectionMode, .fullScreen, file: file, line: line)
+        XCTAssertEqual(value.failurePolicy, .protectionFirst, file: file, line: line)
+        XCTAssertEqual(value.sideWidthFraction, 0.32, file: file, line: line)
+        XCTAssertEqual(value.filterAlpha, 0.7, file: file, line: line)
+        XCTAssertEqual(value.zoneHalfWidth.radians, 0.6, accuracy: 1e-10, file: file, line: line)
+        XCTAssertEqual(value.switchDwell, .milliseconds(200), file: file, line: line)
+        XCTAssertEqual(value.awayDwell, .milliseconds(300), file: file, line: line)
+        XCTAssertEqual(value.returnDwell, .milliseconds(400), file: file, line: line)
+        XCTAssertFalse(value.notificationsEnabled, file: file, line: line)
+        XCTAssertTrue(value.launchAtLogin, file: file, line: line)
+        XCTAssertEqual(value.hotkeyDescriptor, .init(key: "K", modifiers: [.command, .shift]), file: file, line: line)
+    }
+
+    // Break caught: any legacy preset migrates incorrectly, a nonappearance value is lost, or v1 is not rewritten.
+    func testAllLegacyPresetsMigrateAndPreserveEveryOtherSetting() throws {
+        for (preset, strength) in [("soft", 0.30), ("translucent", 0.58), ("privacy", 0.85)] {
+            try withDefaults { defaults in
+                defaults.set(try JSONSerialization.data(withJSONObject: legacyDictionary(preset: preset)), forKey: "appSettings.v1")
+                let store = PreferencesStore(defaults: defaults)
+                let migrated = store.settings
+                XCTAssertNil(store.settingsLoadError)
+                XCTAssertEqual(migrated.schemaVersion, 2)
+                XCTAssertEqual(migrated.overlayEffect, .frosted)
+                XCTAssertEqual(migrated.effectStrength, strength)
+                XCTAssertEqual(migrated.overlayColor, .init(red: 0.3, green: 0.3, blue: 0.3))
+                XCTAssertEqual(migrated.overlayOpacity, 0.73)
+                XCTAssertEqual(migrated.textureAmount, 0.35)
+                assertPreservedNonappearance(migrated)
+                let data = try XCTUnwrap(defaults.data(forKey: "appSettings.v1"))
+                let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+                XCTAssertEqual(json["schemaVersion"] as? Int, 2)
+                XCTAssertNil(json["visualPreset"])
+                XCTAssertNil(json["tintBrightness"])
+                XCTAssertEqual(PreferencesStore(defaults: defaults).settings, migrated)
+            }
+        }
+    }
+
+    // Break caught: one malformed appearance field erases otherwise valid settings or other appearance fields.
+    func testMalformedLegacyAppearancePreservesUnrelatedValidSettings() throws {
+        for field in ["visualPreset", "tintBrightness", "overlayOpacity"] {
+            try withDefaults { defaults in
+                var json = legacyDictionary(preset: "privacy")
+                json[field] = ["not": "a valid value"]
+                defaults.set(try JSONSerialization.data(withJSONObject: json), forKey: "appSettings.v1")
+                let migrated = PreferencesStore(defaults: defaults).settings
+                assertPreservedNonappearance(migrated)
+                XCTAssertEqual(migrated.overlayEffect, .frosted)
+                XCTAssertEqual(migrated.effectStrength, field == "visualPreset" ? 0.58 : 0.85)
+                XCTAssertEqual(migrated.overlayOpacity, field == "overlayOpacity" ? 0.5 : 0.73)
+                let gray = field == "tintBrightness" ? 0.5 : 0.3
+                XCTAssertEqual(migrated.overlayColor, .init(red: gray, green: gray, blue: gray))
+            }
+        }
+    }
+
+    // Break caught: v1's absent fields corrupt an otherwise valid migration.
+    func testMinimalLegacyPayloadUsesLegacyAppearanceDefaults() throws {
+        try withDefaults { defaults in
+            defaults.set(Data(#"{"schemaVersion":1}"#.utf8), forKey: "appSettings.v1")
+            let migrated = PreferencesStore(defaults: defaults).settings
+            var expected = AppSettings.defaults
+            expected.overlayColor = .init(red: 0.5, green: 0.5, blue: 0.5)
+            XCTAssertEqual(migrated, expected)
+        }
+    }
+
+    // Break caught: malformed v2 appearance fields force whole-object fallback or hide valid neighbors.
+    func testMalformedV2AppearanceDefaultsFieldByField() throws {
+        try withDefaults { defaults in
+            var json = legacyDictionary(preset: "privacy")
+            json["schemaVersion"] = 2
+            json["overlayEffect"] = "mist"
+            json["overlayColor"] = "wrong type"
+            json["effectStrength"] = ["wrong": "type"]
+            json["textureAmount"] = false
+            let data = try JSONSerialization.data(withJSONObject: json)
+            defaults.set(data, forKey: "appSettings.v1")
+            for decoded in [try JSONDecoder().decode(AppSettings.self, from: data), PreferencesStore(defaults: defaults).settings] {
+                assertPreservedNonappearance(decoded)
+                XCTAssertEqual(decoded.overlayEffect, .mist)
+                XCTAssertEqual(decoded.overlayColor, .eyeFriendly)
+                XCTAssertEqual(decoded.effectStrength, 0.58)
+                XCTAssertEqual(decoded.textureAmount, 0.35)
+                XCTAssertEqual(decoded.overlayOpacity, 0.73)
+            }
+            json["overlayEffect"] = "future-effect"
+            json["overlayOpacity"] = "wrong type"
+            let decoded = try JSONDecoder().decode(AppSettings.self, from: JSONSerialization.data(withJSONObject: json))
+            assertPreservedNonappearance(decoded)
+            XCTAssertEqual(decoded.overlayEffect, .frosted)
+            XCTAssertEqual(decoded.overlayOpacity, 0.5)
+        }
+    }
+
+    // Break caught: live controls overwrite an unsupported future schema after falling back in memory.
+    func testFuturePayloadIsNotOverwrittenByLiveEdit() throws {
+        withDefaults { defaults in
+            let original = Data(#"{"schemaVersion":99,"opaque":"keep-me"}"#.utf8)
+            defaults.set(original, forKey: "appSettings.v1")
+            let store = PreferencesStore(defaults: defaults)
+            XCTAssertNotNil(store.settingsLoadError)
+            var edit = store.settings
+            edit.overlayOpacity = 0.9
+            store.settings = edit
+            XCTAssertEqual(defaults.data(forKey: "appSettings.v1"), original)
+            XCTAssertEqual(store.settings, .defaults)
+        }
+    }
+
+    // Break caught: an unsuccessful verified migration write destroys the only original copy.
+    func testFailedMigrationWriteRestoresOriginalBytesAndSuppressesLiveWrites() throws {
+        try withDefaults { defaults in
+            let original = try JSONSerialization.data(withJSONObject: legacyDictionary(preset: "soft"))
+            defaults.set(original, forKey: "appSettings.v1")
+            let store = PreferencesStore(defaults: defaults, persist: { _, key in
+                defaults.set(Data("incomplete write".utf8), forKey: key)
+            })
+            XCTAssertNotNil(store.settingsLoadError)
+            XCTAssertEqual(defaults.data(forKey: "appSettings.v1"), original)
+            assertPreservedNonappearance(store.settings)
+            XCTAssertEqual(store.settings.effectStrength, 0.30)
+            let loaded = store.settings
+            store.settings.overlayOpacity = 0.9
+            XCTAssertEqual(defaults.data(forKey: "appSettings.v1"), original)
+            XCTAssertEqual(store.settings, loaded)
         }
     }
 
@@ -32,8 +174,9 @@ final class PreferencesStoreTests: XCTestCase {
     func testChangedSettingsAreObservableAndRoundTrip() throws {
         try withDefaults { defaults in
             let store = PreferencesStore(defaults: defaults)
-            let changed = AppSettings(protectionMode: .fullScreen, visualPreset: .privacy,
-                failurePolicy: .protectionFirst, overlayOpacity: 0.8, tintBrightness: -0.4,
+            let changed = AppSettings(protectionMode: .fullScreen, overlayEffect: .raindrop,
+                overlayColor: .init(red: 0.2, green: 0.3, blue: 0.4), effectStrength: 0.81, textureAmount: 0.62,
+                failurePolicy: .protectionFirst, overlayOpacity: 0.8,
                 sideWidthFraction: 0.35, filterAlpha: 0.7, zoneHalfWidth: .init(degrees: 40),
                 switchDwell: .milliseconds(50), awayDwell: .milliseconds(200),
                 returnDwell: .milliseconds(80), notificationsEnabled: false,

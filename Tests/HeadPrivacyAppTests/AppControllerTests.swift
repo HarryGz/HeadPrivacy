@@ -7,6 +7,21 @@ import HeadPrivacyMac
 
 @MainActor
 final class AppControllerTests: XCTestCase {
+    // Break caught: persistence load errors vanish, block startup, or mutate saved calibration.
+    func testSettingsLoadErrorIsVisibleWithoutChangingStartupOrCalibration() async {
+        let f = Fixture()
+        f.preferences.settingsLoadError = "Settings require a newer app."
+        let original = f.calibrations.values
+        XCTAssertTrue(f.controller.serviceError?.contains("Settings require a newer app.") == true)
+        await f.controller.start()
+        XCTAssertEqual(f.motion.starts, 1)
+        XCTAssertEqual(f.calibrations.values, original)
+        XCTAssertEqual(f.calibrations.saves, 0)
+        XCTAssertFalse(f.controller.calibrationRequired)
+        XCTAssertTrue(f.controller.serviceError?.contains("Settings require a newer app.") == true)
+        f.controller.shutdown()
+    }
+
     func testNextDisplayWaitsForExplicitReadyAndFreshStableWindow() async {
         // Break caught: the previous display's steady samples silently calibrate the next display.
         let f = Fixture()
@@ -1631,7 +1646,10 @@ private final class MotionFake: MotionProviding {
         applications.append((protectedDisplayIDs, settings, statusMessage))
     }
 }
-@MainActor private final class PreferencesFake: AppPreferencesProviding { var settings = AppSettings.defaults }
+@MainActor private final class PreferencesFake: AppPreferencesProviding {
+    var settings = AppSettings.defaults
+    var settingsLoadError: String?
+}
 @MainActor private final class CalibrationFake: CalibrationPersisting {
     var values: [DisplayCalibration] = []
     var shouldFail = false
