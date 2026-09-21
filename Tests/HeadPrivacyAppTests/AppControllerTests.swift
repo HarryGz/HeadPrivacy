@@ -7,6 +7,21 @@ import HeadPrivacyMac
 
 @MainActor
 final class AppControllerTests: XCTestCase {
+    // Break caught: persistence load errors vanish, block startup, or mutate saved calibration.
+    func testSettingsLoadErrorIsVisibleWithoutChangingStartupOrCalibration() async {
+        let f = Fixture()
+        f.preferences.settingsLoadError = "Settings require a newer app."
+        let original = f.calibrations.values
+        XCTAssertTrue(f.controller.serviceError?.contains("Settings require a newer app.") == true)
+        await f.controller.start()
+        XCTAssertEqual(f.motion.starts, 1)
+        XCTAssertEqual(f.calibrations.values, original)
+        XCTAssertEqual(f.calibrations.saves, 0)
+        XCTAssertFalse(f.controller.calibrationRequired)
+        XCTAssertTrue(f.controller.serviceError?.contains("Settings require a newer app.") == true)
+        f.controller.shutdown()
+    }
+
     func testNextDisplayWaitsForExplicitReadyAndFreshStableWindow() async {
         // Break caught: the previous display's steady samples silently calibrate the next display.
         let f = Fixture()
@@ -469,7 +484,8 @@ final class AppControllerTests: XCTestCase {
         await f.controller.updateSettings(settings)
         XCTAssertEqual(f.overlays.last, [])
         settings.failurePolicy = .protectionFirst
-        settings.visualPreset = .privacy
+        settings.overlayEffect = .frosted
+        settings.effectStrength = 0.85
         await f.controller.updateSettings(settings)
         XCTAssertEqual(f.overlays.last, [])
         XCTAssertNil(f.overlays.lastMessage)
@@ -1425,7 +1441,7 @@ final class AppControllerTests: XCTestCase {
         }
     }
 
-    func testSettingsReapplyAppearanceAndConfigureDwellFilterAndServiceErrors() async {
+    func testSettingsReapplyAppearanceAndConfigureDwellFilterAndServiceErrors() async throws {
         let f = Fixture()
         f.hotkey.shouldFail = true
         f.login.shouldFail = true
@@ -1442,10 +1458,32 @@ final class AppControllerTests: XCTestCase {
         await f.sample(0, at: .milliseconds(300))
         XCTAssertEqual(f.overlays.last, ["left", "right"])
         let count = f.overlays.applications.count
+        let calibrationFlow = f.controller.calibrationFlow
+        let calibrationRequired = f.controller.calibrationRequired
+        let calibrations = f.calibrations.values
+        let currentDisplay = f.controller.currentDisplayName
+        let status = f.controller.status
+        XCTAssertEqual(currentDisplay, "center")
+        XCTAssertFalse(calibrationRequired)
+        settings.overlayEffect = .raindrop
+        settings.overlayColor = .init(red: -0.2, green: 0.4, blue: 1.2)
+        settings.effectStrength = 2
+        settings.textureAmount = -1
         settings.overlayOpacity = 0.2
         await f.controller.updateSettings(settings)
         XCTAssertGreaterThan(f.overlays.applications.count, count)
-        XCTAssertEqual(f.overlays.applications.last?.1.overlayOpacity, 0.2)
+        let applied = try XCTUnwrap(f.overlays.applications.last?.1)
+        XCTAssertEqual(applied.overlayEffect, .raindrop)
+        XCTAssertEqual(applied.overlayColor, .init(red: 0, green: 0.4, blue: 1))
+        XCTAssertEqual(applied.effectStrength, 1)
+        XCTAssertEqual(applied.textureAmount, 0)
+        XCTAssertEqual(applied.overlayOpacity, 0.2)
+        XCTAssertEqual(f.overlays.last, ["left", "right"])
+        XCTAssertEqual(f.controller.currentDisplayName, currentDisplay)
+        XCTAssertEqual(f.controller.status, status)
+        XCTAssertEqual(f.controller.calibrationFlow, calibrationFlow)
+        XCTAssertEqual(f.controller.calibrationRequired, calibrationRequired)
+        XCTAssertEqual(f.calibrations.values, calibrations)
         f.controller.shutdown()
     }
 
@@ -1631,7 +1669,10 @@ private final class MotionFake: MotionProviding {
         applications.append((protectedDisplayIDs, settings, statusMessage))
     }
 }
-@MainActor private final class PreferencesFake: AppPreferencesProviding { var settings = AppSettings.defaults }
+@MainActor private final class PreferencesFake: AppPreferencesProviding {
+    var settings = AppSettings.defaults
+    var settingsLoadError: String?
+}
 @MainActor private final class CalibrationFake: CalibrationPersisting {
     var values: [DisplayCalibration] = []
     var shouldFail = false

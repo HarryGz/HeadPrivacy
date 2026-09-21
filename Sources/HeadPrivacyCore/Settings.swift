@@ -3,12 +3,6 @@ public enum ProtectionMode: String, Codable, CaseIterable, Sendable {
     case sides
 }
 
-public enum VisualPreset: String, Codable, CaseIterable, Sendable {
-    case soft
-    case translucent
-    case privacy
-}
-
 public enum FailurePolicy: String, Codable, CaseIterable, Sendable {
     case usabilityFirst
     case protectionFirst
@@ -39,10 +33,12 @@ public struct HotkeyDescriptor: Codable, Equatable, Sendable {
 public struct AppSettings: Codable, Equatable, Sendable {
     public var schemaVersion: Int
     public var protectionMode: ProtectionMode
-    public var visualPreset: VisualPreset
+    public var overlayEffect: OverlayEffect
+    public var overlayColor: OverlayColor
+    public var effectStrength: Double
+    public var textureAmount: Double
     public var failurePolicy: FailurePolicy
     public var overlayOpacity: Double
-    public var tintBrightness: Double
     public var sideWidthFraction: Double
     public var filterAlpha: Double
     public var zoneHalfWidth: Angle
@@ -54,12 +50,14 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var hotkeyDescriptor: HotkeyDescriptor
 
     public init(
-        schemaVersion: Int = 1,
+        schemaVersion: Int = 2,
         protectionMode: ProtectionMode = .sides,
-        visualPreset: VisualPreset = .translucent,
+        overlayEffect: OverlayEffect = .frosted,
+        overlayColor: OverlayColor = .eyeFriendly,
+        effectStrength: Double = 0.58,
+        textureAmount: Double = 0.35,
         failurePolicy: FailurePolicy = .usabilityFirst,
         overlayOpacity: Double = 0.5,
-        tintBrightness: Double = 0,
         sideWidthFraction: Double = 0.25,
         filterAlpha: Double = 0.25,
         zoneHalfWidth: Angle = .init(degrees: 25),
@@ -72,10 +70,12 @@ public struct AppSettings: Codable, Equatable, Sendable {
     ) {
         self.schemaVersion = schemaVersion
         self.protectionMode = protectionMode
-        self.visualPreset = visualPreset
+        self.overlayEffect = overlayEffect
+        self.overlayColor = overlayColor
+        self.effectStrength = effectStrength
+        self.textureAmount = textureAmount
         self.failurePolicy = failurePolicy
         self.overlayOpacity = overlayOpacity
-        self.tintBrightness = tintBrightness
         self.sideWidthFraction = sideWidthFraction
         self.filterAlpha = filterAlpha
         self.zoneHalfWidth = zoneHalfWidth
@@ -90,9 +90,11 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public static let defaults = AppSettings()
     /// Positive smoothing bounds keep fresh samples capable of moving the filtered yaw.
     public static let filterAlphaRange: ClosedRange<Double> = 0.05...1
+    public static let effectStrengthRange: ClosedRange<Double> = 0...1
+    public static let textureAmountRange: ClosedRange<Double> = 0...1
 
     /// Clamps finite values to inclusive UI/persistence bounds: opacity 0...1, filter alpha 0.05...1,
-    /// tint brightness -1...1, each side's width fraction 0.1...0.45, zone half-width 5...90°,
+    /// appearance strength/texture/color 0...1, each side's width fraction 0.1...0.45, zone half-width 5...90°,
     /// and each dwell 0...1 second. Side widths preserve a visible center; zone/dwell bounds
     /// keep the horizontal classifier usable. Nonfinite floating-point values use that
     /// field's default (including a nonfinite angle), so the result remains JSON-encodable.
@@ -100,7 +102,13 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public func validated() -> AppSettings {
         var settings = self
         settings.overlayOpacity = overlayOpacity.isFinite ? min(max(overlayOpacity, 0), 1) : Self.defaults.overlayOpacity
-        settings.tintBrightness = tintBrightness.isFinite ? min(max(tintBrightness, -1), 1) : Self.defaults.tintBrightness
+        settings.overlayColor = overlayColor.validated()
+        settings.effectStrength = effectStrength.isFinite
+            ? min(max(effectStrength, Self.effectStrengthRange.lowerBound), Self.effectStrengthRange.upperBound)
+            : Self.defaults.effectStrength
+        settings.textureAmount = textureAmount.isFinite
+            ? min(max(textureAmount, Self.textureAmountRange.lowerBound), Self.textureAmountRange.upperBound)
+            : Self.defaults.textureAmount
         settings.sideWidthFraction = sideWidthFraction.isFinite ? min(max(sideWidthFraction, 0.1), 0.45) : Self.defaults.sideWidthFraction
         settings.filterAlpha = filterAlpha.isFinite
             ? min(max(filterAlpha, Self.filterAlphaRange.lowerBound), Self.filterAlphaRange.upperBound)
@@ -117,20 +125,22 @@ public struct AppSettings: Codable, Equatable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.init(
             schemaVersion: try container.decode(Int.self, forKey: .schemaVersion),
-            protectionMode: try container.decode(ProtectionMode.self, forKey: .protectionMode),
-            visualPreset: try container.decode(VisualPreset.self, forKey: .visualPreset),
-            failurePolicy: try container.decode(FailurePolicy.self, forKey: .failurePolicy),
-            overlayOpacity: try container.decode(Double.self, forKey: .overlayOpacity),
-            tintBrightness: try container.decode(Double.self, forKey: .tintBrightness),
-            sideWidthFraction: try container.decode(Double.self, forKey: .sideWidthFraction),
-            filterAlpha: try container.decode(Double.self, forKey: .filterAlpha),
-            zoneHalfWidth: try container.decode(Angle.self, forKey: .zoneHalfWidth),
-            switchDwell: try container.decode(Duration.self, forKey: .switchDwell),
-            awayDwell: try container.decode(Duration.self, forKey: .awayDwell),
-            returnDwell: try container.decode(Duration.self, forKey: .returnDwell),
-            notificationsEnabled: try container.decode(Bool.self, forKey: .notificationsEnabled),
-            launchAtLogin: try container.decode(Bool.self, forKey: .launchAtLogin),
-            hotkeyDescriptor: try container.decode(HotkeyDescriptor.self, forKey: .hotkeyDescriptor)
+            protectionMode: try container.decodeIfPresent(ProtectionMode.self, forKey: .protectionMode) ?? Self.defaults.protectionMode,
+            overlayEffect: (try? container.decode(OverlayEffect.self, forKey: .overlayEffect)) ?? Self.defaults.overlayEffect,
+            overlayColor: (try? container.decode(OverlayColor.self, forKey: .overlayColor)) ?? Self.defaults.overlayColor,
+            effectStrength: (try? container.decode(Double.self, forKey: .effectStrength)) ?? Self.defaults.effectStrength,
+            textureAmount: (try? container.decode(Double.self, forKey: .textureAmount)) ?? Self.defaults.textureAmount,
+            failurePolicy: try container.decodeIfPresent(FailurePolicy.self, forKey: .failurePolicy) ?? Self.defaults.failurePolicy,
+            overlayOpacity: (try? container.decode(Double.self, forKey: .overlayOpacity)) ?? Self.defaults.overlayOpacity,
+            sideWidthFraction: try container.decodeIfPresent(Double.self, forKey: .sideWidthFraction) ?? Self.defaults.sideWidthFraction,
+            filterAlpha: try container.decodeIfPresent(Double.self, forKey: .filterAlpha) ?? Self.defaults.filterAlpha,
+            zoneHalfWidth: try container.decodeIfPresent(Angle.self, forKey: .zoneHalfWidth) ?? Self.defaults.zoneHalfWidth,
+            switchDwell: try container.decodeIfPresent(Duration.self, forKey: .switchDwell) ?? Self.defaults.switchDwell,
+            awayDwell: try container.decodeIfPresent(Duration.self, forKey: .awayDwell) ?? Self.defaults.awayDwell,
+            returnDwell: try container.decodeIfPresent(Duration.self, forKey: .returnDwell) ?? Self.defaults.returnDwell,
+            notificationsEnabled: try container.decodeIfPresent(Bool.self, forKey: .notificationsEnabled) ?? Self.defaults.notificationsEnabled,
+            launchAtLogin: try container.decodeIfPresent(Bool.self, forKey: .launchAtLogin) ?? Self.defaults.launchAtLogin,
+            hotkeyDescriptor: try container.decodeIfPresent(HotkeyDescriptor.self, forKey: .hotkeyDescriptor) ?? Self.defaults.hotkeyDescriptor
         )
         self = validated()
     }

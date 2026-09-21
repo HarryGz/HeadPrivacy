@@ -4,6 +4,16 @@ import HeadPrivacyCore
 @testable import HeadPrivacyMac
 
 final class OverlayLayoutTests: XCTestCase {
+    func testSettingsRecipeMatchesAppearanceArguments() {
+        // Break caught: the settings entry point ignores or substitutes an appearance field.
+        let settings = AppSettings(overlayEffect: .mist,
+            overlayColor: .init(red: 0.2, green: 0.4, blue: 0.6),
+            effectStrength: 0.72, textureAmount: 0.18, overlayOpacity: 0.91)
+        XCTAssertEqual(OverlayRecipeFactory.make(settings: settings),
+            OverlayRecipeFactory.make(effect: .mist, color: .init(red: 0.2, green: 0.4, blue: 0.6),
+                effectStrength: 0.72, textureAmount: 0.18, overlayOpacity: 0.91))
+    }
+
     func testFullScreenCoversEntireBounds() {
         // Break caught: leaving a gap in full-screen protection.
         XCTAssertEqual(OverlayLayout.frames(mode: .fullScreen, screenBounds: bounds, sideWidthFraction: 0.25), [bounds])
@@ -60,27 +70,85 @@ final class OverlayLayoutTests: XCTestCase {
         view.frame.size = CGSize(width: 1920, height: 1080)
         view.layoutSubtreeIfNeeded()
         XCTAssertEqual(view.subviews.map(\.frame), [CGRect(x: 0, y: 0, width: 1920, height: 1080)])
-        let effect = try XCTUnwrap(view.subviews.first as? NSVisualEffectView)
-        XCTAssertEqual(effect.blendingMode, .behindWindow)
-        XCTAssertEqual(effect.state, .active)
+        let pane = try XCTUnwrap(view.subviews.first as? ProtectionPane)
+        XCTAssertEqual(pane.blurView.blendingMode, .behindWindow)
+        XCTAssertEqual(pane.blurView.state, .active)
         XCTAssertFalse(view.isOpaque)
     }
 
     @MainActor
-    func testPresetAndValidatedAdvancedSettingsReachEffectAndTint() throws {
-        // Break caught: ignoring preset changes or sending invalid opacity/brightness to AppKit.
+    func testAppearanceSettingsReachBlurTintAndTexture() throws {
+        // Break caught: schema-v2 appearance settings do not reach the composed pane.
         let view = OverlayView(frame: bounds)
-        view.apply(settings: AppSettings(visualPreset: .soft, overlayOpacity: 0.5, tintBrightness: -1))
-        let soft = try XCTUnwrap(view.subviews.first as? NSVisualEffectView)
-        let softTint = try XCTUnwrap(soft.subviews.first?.layer?.backgroundColor)
-        XCTAssertEqual(soft.material, .underWindowBackground)
-        XCTAssertEqual(softTint.alpha, 0.2, accuracy: 0.001)
-        view.apply(settings: AppSettings(visualPreset: .privacy, overlayOpacity: 2, tintBrightness: 2))
-        let privacy = try XCTUnwrap(view.subviews.first as? NSVisualEffectView)
-        let color = try XCTUnwrap(privacy.subviews.first?.layer?.backgroundColor)
-        XCTAssertEqual(privacy.material, .hudWindow)
-        XCTAssertEqual(color.alpha, 1)
-        XCTAssertEqual(NSColor(cgColor: color)?.usingColorSpace(.deviceRGB)?.redComponent, 1)
+        let settings = AppSettings(protectionMode: .fullScreen, overlayEffect: .raindrop,
+            overlayColor: .init(red: 0.1, green: 0.2, blue: 0.3),
+            effectStrength: 0.85, textureAmount: 0.4, overlayOpacity: 0.6)
+        view.apply(settings: settings)
+        let pane = try XCTUnwrap(view.subviews.first as? ProtectionPane)
+        XCTAssertEqual(pane.blurView.material, .hudWindow)
+        XCTAssertNotNil(pane.textureView)
+        XCTAssertEqual(pane.textureView?.recipe,
+            OverlayRecipeFactory.make(settings: settings).texture)
+    }
+
+    @MainActor
+    func testRepeatedAppearanceUpdatesReusePaneAndTexture() throws {
+        // Break caught: an appearance-only update discards live pane or texture instances.
+        let view = OverlayView(frame: bounds)
+        view.apply(settings: .defaults)
+        let pane = try XCTUnwrap(view.subviews.first as? ProtectionPane)
+        let texture = pane.textureView
+        var changed = AppSettings.defaults
+        changed.overlayEffect = .mist
+        view.apply(settings: changed)
+        XCTAssertTrue(pane === view.subviews.first)
+        XCTAssertTrue(texture === pane.textureView)
+    }
+
+    @MainActor
+    func testSidesToFullScreenToSidesPreservesSurvivingPaneAndTexture() throws {
+        // Break caught: changing coverage replaces the pane shared by both modes.
+        let view = OverlayView(frame: bounds)
+        let pane = try XCTUnwrap(view.subviews.first as? ProtectionPane)
+        let texture = try XCTUnwrap(pane.textureView)
+        let removedPane = try XCTUnwrap(view.subviews.last as? ProtectionPane)
+        view.apply(settings: AppSettings(protectionMode: .fullScreen))
+        XCTAssertEqual(view.subviews.count, 1)
+        XCTAssertTrue(view.subviews.first === pane)
+        XCTAssertTrue(pane.textureView === texture)
+        XCTAssertNil(removedPane.superview)
+        XCTAssertEqual(pane.frame, bounds)
+
+        view.apply(settings: AppSettings(protectionMode: .sides))
+        XCTAssertEqual(view.subviews.count, 2)
+        XCTAssertTrue(view.subviews.first === pane)
+        XCTAssertTrue(pane.textureView === texture)
+        XCTAssertEqual(view.subviews.map(\.frame), [
+            CGRect(x: 0, y: 0, width: 360, height: 900),
+            CGRect(x: 1080, y: 0, width: 360, height: 900),
+        ])
+    }
+
+    @MainActor
+    func testResizeAndStyleSwitchDoNotAccumulatePaneChildren() throws {
+        // Break caught: repeated style and resize updates retain stale panes or texture children.
+        let view = OverlayView(frame: bounds)
+        var settings = AppSettings(protectionMode: .fullScreen, overlayEffect: .frosted)
+        for (size, effect) in [
+            (CGSize(width: 1440, height: 900), OverlayEffect.frosted),
+            (CGSize(width: 1920, height: 1080), .mist),
+            (CGSize(width: 1280, height: 720), .raindrop),
+        ] {
+            settings.overlayEffect = effect
+            view.frame.size = size
+            view.apply(settings: settings, statusMessage: "Protection active")
+            view.layoutSubtreeIfNeeded()
+        }
+        let pane = try XCTUnwrap(view.subviews.first as? ProtectionPane)
+        XCTAssertEqual(view.subviews.compactMap { $0 as? ProtectionPane }.count, 1)
+        XCTAssertEqual(pane.subviews.count, 3)
+        XCTAssertEqual(pane.textureView?.frame, pane.bounds)
+        XCTAssertTrue(view.subviews.last === view.statusPanel)
     }
 
     @MainActor

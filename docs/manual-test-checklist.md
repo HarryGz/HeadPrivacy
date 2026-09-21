@@ -12,7 +12,7 @@
 | CPU 架构 | arm64 |
 | AirPods 型号 / 固件 | NOT RECORDED |
 | 显示器型号 / 左右排列 | NOT RECORDED |
-| App commit / 版本 | `1ce1df0` / `0.1.0` |
+| App commit / 版本 | `d90f1bb` / `0.1.0` |
 | 执行人 | NOT RECORDED |
 
 状态只能填写：
@@ -30,12 +30,14 @@
 
 | 检查 | 证据 | 状态 |
 |---|---|---|
-| Swift 测试套件 | `swift test --disable-sandbox`：160 tests，0 failures；2026-09-18 | PASS |
-| arm64 Release app bundle | `./Scripts/build-app.sh`：exit 0，产物为 `build/HeadPrivacy.app`；2026-09-18 | PASS |
-| Info.plist 语法 | `plutil -lint build/HeadPrivacy.app/Contents/Info.plist`：`OK` | PASS |
-| ad-hoc 签名完整性 | `codesign --verify --deep --strict --verbose=2 build/HeadPrivacy.app`：`valid on disk`、`satisfies its Designated Requirement` | PASS |
-| 可执行文件架构 | `file`：`Mach-O 64-bit executable arm64`；`lipo -archs`：`arm64` | PASS |
-| 权限键静态检查 | 对 `Config/Info.plist` 与 bundle plist 执行 `plutil -p` 和敏感权限键检索：两者一致且只有非空 `NSMotionUsageDescription`，未发现 Screen Recording、Accessibility、相机、麦克风、定位或网络权限说明键 | PASS |
+| Swift 测试套件 | `CLANG_MODULE_CACHE_PATH=/tmp/headprivacy-clang-cache SWIFTPM_MODULECACHE_OVERRIDE=/tmp/headprivacy-swiftpm-cache swift test --disable-sandbox --scratch-path /tmp/headprivacy-scratch-task7`：73 HeadPrivacyMacTests + 40 HeadPrivacyCoreTests + 78 HeadPrivacyAppTests = 191 tests，0 failures；2026-09-21 | PASS |
+| 空白差异检查 | `git diff --check`：exit 0，无空白错误；2026-09-21 | PASS |
+| arm64 Release app bundle | `CLANG_MODULE_CACHE_PATH=/tmp/headprivacy-clang-cache SWIFTPM_MODULECACHE_OVERRIDE=/tmp/headprivacy-swiftpm-cache ./Scripts/build-app.sh`：exit 0，产物为 `build/HeadPrivacy.app`；2026-09-21 | PASS |
+| Info.plist 语法 | `plutil -lint build/HeadPrivacy.app/Contents/Info.plist`：`build/HeadPrivacy.app/Contents/Info.plist: OK`；2026-09-21 | PASS |
+| ad-hoc 签名完整性 | `codesign --verify --deep --strict --verbose=2 build/HeadPrivacy.app`：`valid on disk`、`satisfies its Designated Requirement`；2026-09-21 | PASS |
+| 可执行文件架构 | `file`：`Mach-O 64-bit executable arm64`；`lipo -archs`：`arm64`；2026-09-21 | PASS |
+| 权限键与 API 静态检查 | `rg -n 'ScreenCaptureKit|CGWindowList|CGDisplayStream|SCStream|NSCameraUsageDescription|NSMicrophoneUsageDescription|NSAppleEventsUsageDescription' Sources Config Package.swift`：无匹配；`plutil -p build/HeadPrivacy.app/Contents/Info.plist`：只有 `NSMotionUsageDescription`，未见新增敏感 usage-description key；2026-09-21 | PASS |
+| 本地启动/UI smoke | `open build/HeadPrivacy.app`：LaunchServices 返回 `NSOSStatusErrorDomain Code=-10827 (kLSNoExecutableErr)`；此受限会话也无法调用 `pgrep` 观察进程，未能检查 Settings UI | BLOCKED |
 
 ## 硬件与 UI 验收
 
@@ -47,15 +49,15 @@
 | H02 | Apple-silicon MacBook；内置显示器启用且作为唯一活动显示器；连接任一代 AirPods Pro；Motion 已允许；完成单屏校准 | 重复 H01 的水平转头 | Core Motion 运行时能力可用，状态随 yaw 更新 | 未执行；MacBook/AirPods 身份未记录 | 记录首次样本及状态变化时间 | NOT RUN |
 | H03 | 全新权限状态；已构建并启动本地 app | 在系统弹窗允许 Motion，然后佩戴支持的 AirPods 并校准 | 仅出现 Motion 请求；允许后可进入校准并获得样本 | 未执行 | 不适用 | NOT RUN |
 | H04 | Motion 权限已拒绝 | 启动 app；查看指引；到系统设置重新允许；返回并重新校准 | 拒绝时不启动保护且明确提示；重新允许后可恢复，不复用不安全校准 | 未执行 | 记录恢复到可校准的时间 | NOT RUN |
-| H05 | 单显示器；已校准；Side + Translucent；录屏或高速摄像 | 从屏幕中心大幅转向所有校准区之外 | 该显示器进入保护；从越过阈值到遮罩可见小于 250 ms | 未执行 | 目标 `<250 ms`；实测：— | NOT RUN |
+| H05 | 单显示器；已校准；Side + Frosted（默认外观）；录屏或高速摄像 | 从屏幕中心大幅转向所有校准区之外 | 该显示器进入保护；从越过阈值到遮罩可见小于 250 ms | 未执行 | 目标 `<250 ms`；实测：— | NOT RUN |
 | H06 | 延续 H05，显示器当前已保护 | 转回已校准中心区域 | 当前显示器恢复清晰；从进入区域到清晰小于 200 ms | 未执行 | 目标 `<200 ms`；实测：— | NOT RUN |
 | H07 | Apple-silicon MacBook 内置显示器保持启用；另接两台外接显示器；三台显示器水平排列，系统排列与物理左右顺序一致 | 按引导从左到右校准；第一屏捕获后继续看第一屏至少一秒，确认第二屏未采样；转向第二屏并按“I'm Looking Here — Start Sampling”；第三屏重复 | 引导顺序为左→中→右；新屏必须显式确认后才开始新的稳定窗口；三个中心均成功保存 | 未执行；MacBook/显示器未记录 | 不适用 | NOT RUN |
 | H08 | 延续 H07；自动保护开启 | 依次稳定看左、中、右显示器 | 每次仅正在看的显示器清晰，其他两台被保护 | 未执行 | 每次记录状态切换延迟 | NOT RUN |
 | H09 | 延续 H07；自动保护开启 | 看向所有已校准显示区域之外并保持 | 所有显示器均被保护 | 未执行 | 记录 away 触发延迟 | NOT RUN |
 | H10 | 清除偏好后首次启动 | 打开“保护”设置页 | 默认模式显示为 Side；侧边区域遮挡、屏幕中部保留 | 未执行 | 不适用 | NOT RUN |
 | H11 | 已完成校准；保护模式切为 Full-screen | 触发另一屏或 away 保护 | 被保护显示器整屏遮挡，当前查看屏保持清晰 | 未执行 | 记录更新延迟 | NOT RUN |
-| H12 | Side 模式 | 依次选择 Soft、Translucent、Privacy 并触发保护 | 三种外观均可辨识且符合强度递增预期；交互不被遮罩窗口抢占 | 未执行 | 不适用 | NOT RUN |
-| H13 | 清除偏好后首次启动 | 打开“保护”设置页 | 默认预设为 Translucent | 未执行 | 不适用 | NOT RUN |
+| H12 | Side 模式；已校准并触发保护 | 依次选择 Frosted、Mist、Raindrop 并在每种外观下重新触发保护 | 三种外观均可辨识；Frosted 具有细粒、Mist 具有静态渐变、Raindrop 具有静态水滴形状；交互不被遮罩窗口抢占 | 未执行 | 不适用 | NOT RUN |
+| H13 | 清除偏好后首次启动 | 打开“保护”设置页 | 默认值为 Frosted、`#667064`、Effect strength 58%、高级纹理参数 35% 与 Opacity 50% | 未执行 | 不适用 | NOT RUN |
 | H14 | 已校准并稳定看当前屏 | 做小幅左右摆头但不越过区域边界 | 不切换屏幕、不闪烁保护状态 | 未执行 | 观察至少 30 秒 | NOT RUN |
 | H15 | 已校准并稳定看当前屏 | 只点头、尽量保持水平朝向 | 不因 pitch 变化切换屏幕或触发 away | 未执行 | 观察至少 10 次点头 | NOT RUN |
 | H16 | 使用可跨越 ±180° 相对 yaw 的布置/动作；录制状态 | 缓慢越过 wraparound 边界 | 角度连续，不绕经 0° 误判到远端显示器 | 未执行 | 记录状态轨迹 | NOT RUN |
@@ -82,6 +84,12 @@
 | H37 | 已校准并运行；连接至少一台外接显示器 | 关闭 MacBook 内置显示器，进入仅外接布局；观察菜单/设置和校准入口 | 自动分类停止；显示“必须恰好一个 MacBook 内置显示器”的可操作错误；要求完整重校准且不允许单屏重校准 | 未执行 | 记录失效检测时间 | NOT RUN |
 | H38 | 停止旧进程；使用 `9d8da3f` 构建新的本地 bundle | 在 Finder 双击 `build/HeadPrivacy.app` | 进程正常进入 AppKit 生命周期，不停在 SwiftUI `runApp` 初始化；显示 “Calibrate Displays” 窗口和 “Start Full Calibration” 操作 | 2026-09-18 22:32，经 Finder 启动后窗口可见且 CUA 可读取；当前三屏拓扑通过预检并进入 “Begin” 步骤；未请求或接受 Motion 权限 | 不适用 | PASS |
 | H39 | 三屏水平布局；AirPods Pro 已连接；使用 `1ce1df0` bundle | 完成左屏采样；进入中屏 ready 后等待至少 2 秒再继续 | ready 阶段不触发 “Motion samples stopped”；转头样本不计入中屏稳定窗口；可继续中屏采样 | 旧版已复现 500 ms ready 超时；修复版尚待实机重测 | 记录等待时长与中屏进度 | NOT RUN |
+| H40 | 已打开 Protection 设置；任意已校准显示器处于保护状态 | 用 Color 面板选择明显不同的自定义 sRGB 颜色；触发保护；再按 `Use Default Color` 并再次触发保护 | 自定义颜色立即应用且保持独立 Opacity；`Use Default Color` 恢复 `#667064`；Color 面板与覆盖层不抢占正常交互 | 未执行 | 记录颜色更新可见时间 | NOT RUN |
+| H41 | 已校准；对 Frosted、Mist、Raindrop 分别重复 | 每种效果依次设为 Effect strength 0%、默认 58%、100%，并触发保护 | 三档均可设置且保持响应；更高值呈更强组合视觉效果；文案不承诺精确 blur radius | 未执行 | 记录设置更新可见时间 | NOT RUN |
+| H42 | 至少一台已保护显示器；可改变 app 窗口或显示器布局尺寸 | 快速重复切换三种 Effect，并多次调整 Settings 窗口和显示器尺寸/排列后触发保护 | 无残留、叠加或过期纹理层；覆盖范围仍与 Full screen/Sides 设置一致；app 保持响应 | 未执行 | 记录重绘或响应异常 | NOT RUN |
+| H43 | 已校准并触发保护；系统可切换“降低透明度” | 启用 Reduce Transparency，分别检查 Frosted、Mist、Raindrop，再关闭该系统设置 | 在透明效果受系统抑制时，tint 与静态纹理仍遮蔽受保护显示器；切换不导致无遮罩泄漏 | 未执行 | 记录切换后行为 | NOT RUN |
+| H44 | 已校准；每种效果各一次；可观察至少 30 秒 | 在不改设置和 pane 尺寸的情况下观察 Frosted、Mist、Raindrop；同时操作菜单与 Settings | 纹理为静态、无持续动画或定时重绘；设置/菜单操作仍及时响应；Raindrop 仅为程序形状，不随桌面内容变化或做实时折射 | 未执行 | 观察至少 30 秒/效果 | NOT RUN |
+| H45 | 全新或可观察权限状态；已构建并启动本地 app | 依次切换 Frosted、Mist、Raindrop，使用 Color 面板并触发保护；观察系统权限提示和 Privacy & Security 列表 | 不出现 Screen Recording 请求，HeadPrivacy 不出现在 Screen Recording；效果不捕获、读取或分析屏幕像素 | 未执行 | 不适用 | NOT RUN |
 
 ## 结果处理
 

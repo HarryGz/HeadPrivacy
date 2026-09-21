@@ -45,7 +45,13 @@ extension DisplayRegistry: DisplayRegistryProviding {}
 }
 extension OverlayCoordinator: OverlayCoordinating {}
 
-@MainActor protocol AppPreferencesProviding: AnyObject { var settings: AppSettings { get set } }
+@MainActor protocol AppPreferencesProviding: AnyObject {
+    var settings: AppSettings { get set }
+    var settingsLoadError: String? { get }
+}
+extension AppPreferencesProviding {
+    var settingsLoadError: String? { nil }
+}
 extension PreferencesStore: AppPreferencesProviding {}
 
 @MainActor protocol CalibrationPersisting {
@@ -79,13 +85,14 @@ final class AppController {
     private var displayWidthError: String?
     private var topologyError: String?
     private var notificationAuthorizationError: String?
+    private(set) var settingsPersistenceError: String?
     private(set) var hotkeyError: String?
     private(set) var loginItemError: String?
     private(set) var registeredHotkey: HotkeyDescriptor?
     private(set) var serviceError: String? {
         get {
             let errors = [operationError, displayWidthError, topologyError, notificationAuthorizationError,
-                          hotkeyError, loginItemError].compactMap { $0 }
+                          hotkeyError, loginItemError, settingsPersistenceError].compactMap { $0 }
             return errors.isEmpty ? nil : errors.joined(separator: "\n")
         }
         set { operationError = newValue }
@@ -191,6 +198,7 @@ final class AppController {
         self.preferences = preferences; self.calibrationStore = calibrationStore
         self.notifications = notifications; self.hotkey = hotkey; self.loginItem = loginItem
         self.timing = timing; settings = preferences.settings.validated()
+        settingsPersistenceError = preferences.settingsLoadError
     }
 
     func start(requireCalibration: Bool = false) async {

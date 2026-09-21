@@ -39,11 +39,15 @@ open build/HeadPrivacy.app
 默认配置为：
 
 - `Side`：只保护显示器两侧区域；也可选择整屏 `Full-screen`。
-- `Translucent` 半透明外观；另有 `Soft` 和更强的 `Privacy`。
+- `Frosted` 外观，默认暖灰绿色 `#667064`、58% `Effect strength`、50% `Opacity`，以及 35% 的高级纹理参数。
+- 可在 `Frosted`、`Mist` 和 `Raindrop` 三种外观间切换；可用 `Color` 选择自定义 sRGB 颜色，或点按 `Use Default Color` 恢复 `#667064`。
+- `Effect strength` 是 0% 到 100% 的组合视觉强度，而不是精确的 blur radius；`Opacity` 独立控制颜色 tint 的不透明度。
 - `Usability-first`：耳机断开、权限不可用或 motion 样本中断时移除遮罩；可改为 `Protection-first`，中断时保护所有显示器。
 - 全局暂停/恢复快捷键：`⌃⌥⌘P`。
 
-Settings 中可以调整触发区域宽度、切换/离开/返回停留时间、平滑强度、遮罩透明度和亮度、Side 宽度、每台显示器的区域宽度、失败策略、通知、登录时启动和全局快捷键。当前 motion 参考和完整显示器拓扑仍然有效时，可以只重校准某一台显示器；启动、唤醒、耳机断开或显示器布局变化后必须执行完整校准。
+Settings 的 Protection 页面可以调整 Coverage、Effect、Color、Effect strength 和 Opacity；展开 `Advanced Effect Controls` 后，Frosted 显示 `Grain amount`、Mist 显示 `Mist spread`、Raindrop 显示 `Droplet density`。其余可调项目包括触发区域宽度、切换/离开/返回停留时间、平滑强度、Side 宽度、每台显示器的区域宽度、失败策略、通知、登录时启动和全局快捷键。当前 motion 参考和完整显示器拓扑仍然有效时，可以只重校准某一台显示器；启动、唤醒、耳机断开或显示器布局变化后必须执行完整校准。
+
+Frosted 的细粒、Mist 的渐变和 Raindrop 的水滴形状都是静态、确定性的程序纹理。尤其 Raindrop 不是对桌面内容做实时折射：它不会采样、截取或分析屏幕内容，只有设置或 pane 尺寸改变时才重新生成。
 
 `Protection-first` 因 motion 中断或校准失效而覆盖显示器时，遮罩会显示不含屏幕内容的状态说明。此时仍可从菜单选择暂停/临时显示全部，或按已配置的全局快捷键立即显示全部；在安全校准恢复前不能重新开启自动保护。
 
@@ -51,8 +55,8 @@ Settings 中可以调整触发区域宽度、切换/离开/返回停留时间、
 
 ## 隐私设计
 
-- 只请求 Motion 权限；不需要 Screen Recording、Accessibility、相机、麦克风、定位或网络权限。
-- 不截取、读取或存储屏幕像素，也不包含遥测或网络连接。
+- 只请求 Motion 权限；所有 Frosted、Mist 与 Raindrop 效果均不需要 Screen Recording、Accessibility、相机、麦克风、定位或网络权限。
+- 不截取、读取或存储屏幕像素，也不包含遥测或网络连接；包括 Raindrop 在内的效果都不捕获屏幕像素。
 - 原始 motion 样本只在内存中参与即时分类，随后丢弃，不写入磁盘。
 - 持久化校准只包含显示器 ID、显示器名称、相对中心 yaw 和区域半宽；不保存屏幕 frame、拓扑几何或 motion 历史。
 
