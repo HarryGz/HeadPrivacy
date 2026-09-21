@@ -44,6 +44,13 @@ public struct OverlayRecipe: Equatable, Sendable {
 }
 
 public enum OverlayRecipeFactory {
+    public static func make(settings: AppSettings) -> OverlayRecipe {
+        let value = settings.validated()
+        return make(effect: value.overlayEffect, color: value.overlayColor,
+            effectStrength: value.effectStrength, textureAmount: value.textureAmount,
+            overlayOpacity: value.overlayOpacity)
+    }
+
     public static func make(effect: OverlayEffect, color: OverlayColor,
         effectStrength: Double, textureAmount: Double, overlayOpacity: Double) -> OverlayRecipe {
         let strength = finiteClamp(effectStrength, default: 0.58)

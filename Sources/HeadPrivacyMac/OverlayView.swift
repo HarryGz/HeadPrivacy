@@ -16,7 +16,7 @@ public enum OverlayLayout {
 @MainActor
 public final class OverlayView: NSView {
     private var settings = AppSettings.defaults
-    private var protectionViews: [NSVisualEffectView] = []
+    private var protectionPanes: [ProtectionPane] = []
     private(set) var statusMessage: String?
     private(set) var statusPanel: NSView?
 
@@ -33,44 +33,21 @@ public final class OverlayView: NSView {
     }
 
     public func apply(settings: AppSettings, statusMessage: String? = nil) {
-        var validated = settings.validated()
-        // Public mutable settings can contain non-finite values even though JSON cannot.
-        if !validated.overlayOpacity.isFinite { validated.overlayOpacity = AppSettings.defaults.overlayOpacity }
-        if !validated.tintBrightness.isFinite { validated.tintBrightness = AppSettings.defaults.tintBrightness }
-        if !validated.sideWidthFraction.isFinite { validated.sideWidthFraction = AppSettings.defaults.sideWidthFraction }
+        let validated = settings.validated()
         self.settings = validated
 
-        let material: NSVisualEffectView.Material
-        let tintStrength: CGFloat
-        switch validated.visualPreset {
-        case .soft: (material, tintStrength) = (.underWindowBackground, 0.4)
-        case .translucent: (material, tintStrength) = (.sidebar, 0.7)
-        case .privacy: (material, tintStrength) = (.hudWindow, 1)
-        }
         let frames = OverlayLayout.frames(mode: validated.protectionMode, screenBounds: bounds,
                                           sideWidthFraction: validated.sideWidthFraction)
-        if protectionViews.count != frames.count {
-            protectionViews.forEach { $0.removeFromSuperview() }
-            protectionViews.removeAll()
-            for _ in frames {
-                let effect = NSVisualEffectView()
-                effect.blendingMode = .behindWindow
-                effect.state = .active
-                let tint = NSView()
-                tint.wantsLayer = true
-                effect.addSubview(tint)
-                addSubview(effect)
-                protectionViews.append(effect)
-            }
+        while protectionPanes.count > frames.count {
+            protectionPanes.removeLast().removeFromSuperview()
         }
-        for effect in protectionViews {
-            effect.material = material
-            // Brightness -1...1 maps to black...white; zero is neutral gray.
-            effect.subviews.first?.layer?.backgroundColor = NSColor(
-                calibratedWhite: (validated.tintBrightness + 1) / 2,
-                alpha: validated.overlayOpacity * tintStrength
-            ).cgColor
+        while protectionPanes.count < frames.count {
+            let pane = ProtectionPane(frame: .zero)
+            addSubview(pane)
+            protectionPanes.append(pane)
         }
+        let recipe = OverlayRecipeFactory.make(settings: validated)
+        protectionPanes.forEach { $0.apply(recipe: recipe) }
         updateStatus(statusMessage)
         needsLayout = true
         layoutSubtreeIfNeeded()
@@ -80,9 +57,8 @@ public final class OverlayView: NSView {
         super.layout()
         let frames = OverlayLayout.frames(mode: settings.protectionMode, screenBounds: bounds,
                                           sideWidthFraction: settings.sideWidthFraction)
-        for (effect, frame) in zip(protectionViews, frames) {
-            effect.frame = frame
-            effect.subviews.first?.frame = effect.bounds
+        for (pane, frame) in zip(protectionPanes, frames) {
+            pane.frame = frame
         }
         if let statusPanel {
             let width = max(0, min(bounds.width - 48, 460))
