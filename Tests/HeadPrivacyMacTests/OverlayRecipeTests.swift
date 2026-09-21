@@ -31,6 +31,34 @@ final class OverlayRecipeTests: XCTestCase {
         }
     }
 
+    func testMistRecipeIdentityPayloadAndSeedAtStrengthBoundaries() {
+        // Break caught: Mist maps to another effect or ignores its strength input.
+        for (strength, expectedSpread) in [(0.0, 0.0525), (0.34, 0.15365),
+            (0.58, 0.22505), (0.75, 0.275625), (1.0, 0.35)] {
+            let recipe = OverlayRecipeFactory.make(effect: .mist, color: .eyeFriendly,
+                effectStrength: strength, textureAmount: 0.35, overlayOpacity: 0.5)
+            guard case let .mist(spread, seed) = recipe.texture else {
+                return XCTFail("Expected mist texture at strength \(strength)")
+            }
+            XCTAssertEqual(spread, expectedSpread, accuracy: 1e-12)
+            XCTAssertEqual(seed, 0x48454144)
+        }
+    }
+
+    func testRaindropRecipeIdentityPayloadAndSeedAtStrengthBoundaries() {
+        // Break caught: Raindrop maps to another effect or ignores its strength input.
+        for (strength, expectedDensity) in [(0.0, 0.0525), (0.34, 0.15365),
+            (0.58, 0.22505), (0.75, 0.275625), (1.0, 0.35)] {
+            let recipe = OverlayRecipeFactory.make(effect: .raindrop, color: .eyeFriendly,
+                effectStrength: strength, textureAmount: 0.35, overlayOpacity: 0.5)
+            guard case let .raindrop(density, seed) = recipe.texture else {
+                return XCTFail("Expected raindrop texture at strength \(strength)")
+            }
+            XCTAssertEqual(density, expectedDensity, accuracy: 1e-12)
+            XCTAssertEqual(seed, 0x48454144)
+        }
+    }
+
     func testNonfiniteStrengthFallsBackToDefaultRecipeInputs() {
         for value in nonfiniteValues {
             let recipe = OverlayRecipeFactory.make(effect: .frosted, color: .eyeFriendly,

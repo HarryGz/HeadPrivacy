@@ -9,6 +9,8 @@ public final class OverlayTextureView: NSView {
     public override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
+        clipsToBounds = true
+        layer?.masksToBounds = true
     }
 
     required init?(coder: NSCoder) {

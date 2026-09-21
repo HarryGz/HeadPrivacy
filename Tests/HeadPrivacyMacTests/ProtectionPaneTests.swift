@@ -40,11 +40,36 @@ final class ProtectionPaneTests: XCTestCase {
         texture.frame.size = CGSize(width: 400, height: 300)
         texture.layoutSubtreeIfNeeded()
         let afterResize = try XCTUnwrap(texture.layer?.sublayers?.first)
+        texture.needsLayout = true
         texture.layoutSubtreeIfNeeded()
         let afterUnchangedLayout = try XCTUnwrap(texture.layer?.sublayers?.first)
 
         XCTAssertFalse(beforeResize === afterResize)
         XCTAssertTrue(afterResize === afterUnchangedLayout)
+    }
+
+    func testTexturesStayClippedToPaneAfterResizingAndEffectChanges() throws {
+        // Break caught: texture overflow paints into the clear center of Sides mode.
+        let pane = ProtectionPane(frame: .init(x: 0, y: 0, width: 400, height: 300))
+        for size in [CGSize(width: 400, height: 300), CGSize(width: 240, height: 600)] {
+            pane.frame.size = size
+            for effect in [OverlayEffect.mist, .raindrop, .frosted, .mist] {
+                pane.apply(recipe: recipe(effect))
+                pane.layoutSubtreeIfNeeded()
+                let texture = try XCTUnwrap(pane.textureView)
+                let layer = try XCTUnwrap(texture.layer)
+
+                XCTAssertEqual(texture.frame, pane.bounds)
+                XCTAssertTrue(texture.clipsToBounds)
+                XCTAssertTrue(layer.masksToBounds)
+                if effect == .mist {
+                    // The fixed recipe really produces overflow, so clipping is required.
+                    XCTAssertTrue(try XCTUnwrap(layer.sublayers).contains {
+                        $0.frame.maxX > texture.bounds.maxX
+                    })
+                }
+            }
+        }
     }
 
     func testTextureFactoryFailureKeepsBlurAndTintActive() {

@@ -80,11 +80,11 @@ struct SettingsView: View {
             Button("Use Default Color") { edit { $0.overlayColor = .eyeFriendly } }
                 .accessibilityLabel("Use Default Color")
                 .accessibilityValue(controller.settings.overlayColor == .eyeFriendly ? "Default color selected" : "Custom color selected")
-            numeric("Effect strength", value: binding(\.effectStrength), range: 0...1)
-            numeric("Opacity", value: binding(\.overlayOpacity), range: 0...1)
+            numeric("Effect strength", value: binding(\.effectStrength), range: 0...1, format: .percent)
+            numeric("Opacity", value: binding(\.overlayOpacity), range: 0...1, format: .percent)
 
             DisclosureGroup("Advanced Effect Controls", isExpanded: $advancedAppearanceExpanded) {
-                numeric(textureLabel, value: binding(\.textureAmount), range: 0...1)
+                numeric(textureLabel, value: binding(\.textureAmount), range: 0...1, format: .percent)
                 if controller.settings.protectionMode == .sides {
                     numeric("Width of each side", value: binding(\.sideWidthFraction), range: 0.1...0.45)
                 }
@@ -187,17 +187,19 @@ struct SettingsView: View {
         }, set: { value in edit { $0[keyPath: keyPath] = .milliseconds(value) } })
     }
 
-    private func numeric(_ title: String, value: Binding<Double>, range: ClosedRange<Double>, step: Double = 0.01) -> some View {
-        VStack(alignment: .leading) {
+    private func numeric(_ title: String, value: Binding<Double>, range: ClosedRange<Double>,
+        step: Double = 0.01, format: SettingsNumericFormat = .number) -> some View {
+        let formattedValue = format.string(value.wrappedValue)
+        return VStack(alignment: .leading) {
             HStack {
                 Text(title)
                 Spacer()
-                Text(value.wrappedValue.formatted(.number.precision(.fractionLength(0...2))))
+                Text(formattedValue)
                     .monospacedDigit()
             }
             Slider(value: value, in: range, step: step)
                 .accessibilityLabel(title)
-                .accessibilityValue(value.wrappedValue.formatted(.number.precision(.fractionLength(0...2))))
+                .accessibilityValue(formattedValue)
         }
     }
 }
