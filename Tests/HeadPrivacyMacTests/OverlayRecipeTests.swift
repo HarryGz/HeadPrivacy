@@ -31,6 +31,30 @@ final class OverlayRecipeTests: XCTestCase {
         }
     }
 
+    func testNonfiniteStrengthFallsBackToDefaultRecipeInputs() {
+        for value in nonfiniteValues {
+            let recipe = OverlayRecipeFactory.make(effect: .frosted, color: .eyeFriendly,
+                effectStrength: value, textureAmount: 0.35, overlayOpacity: 0.5)
+            assertDefaultFallbackRecipe(recipe)
+        }
+    }
+
+    func testNonfiniteTextureAmountFallsBackToDefaultRecipeInputs() {
+        for value in nonfiniteValues {
+            let recipe = OverlayRecipeFactory.make(effect: .frosted, color: .eyeFriendly,
+                effectStrength: 0.58, textureAmount: value, overlayOpacity: 0.5)
+            assertDefaultFallbackRecipe(recipe)
+        }
+    }
+
+    func testNonfiniteOpacityFallsBackToDefaultRecipeInputs() {
+        for value in nonfiniteValues {
+            let recipe = OverlayRecipeFactory.make(effect: .frosted, color: .eyeFriendly,
+                effectStrength: 0.58, textureAmount: 0.35, overlayOpacity: value)
+            assertDefaultFallbackRecipe(recipe)
+        }
+    }
+
     private func recipe(strength: Double) -> OverlayRecipe {
         OverlayRecipeFactory.make(effect: .frosted, color: .eyeFriendly,
             effectStrength: strength, textureAmount: 0.35, overlayOpacity: 0.5)
@@ -39,5 +63,21 @@ final class OverlayRecipeTests: XCTestCase {
     private func make(_ effect: OverlayEffect) -> OverlayRecipe {
         OverlayRecipeFactory.make(effect: effect, color: .eyeFriendly,
             effectStrength: 0.58, textureAmount: 0.35, overlayOpacity: 0.5)
+    }
+
+    private var nonfiniteValues: [Double] {
+        [.nan, .infinity, -.infinity]
+    }
+
+    private func assertDefaultFallbackRecipe(_ recipe: OverlayRecipe,
+        file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertEqual(recipe.material, .sidebar, file: file, line: line)
+        XCTAssertEqual(recipe.blurAlpha, 0.811, accuracy: 1e-12, file: file, line: line)
+        XCTAssertEqual(recipe.tint.alpha, 0.3635, accuracy: 1e-12, file: file, line: line)
+        guard case let .frosted(grain, seed) = recipe.texture else {
+            return XCTFail("Expected frosted texture", file: file, line: line)
+        }
+        XCTAssertEqual(grain, 0.22505, accuracy: 1e-12, file: file, line: line)
+        XCTAssertEqual(seed, 0x48454144, file: file, line: line)
     }
 }
